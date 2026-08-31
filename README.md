@@ -216,6 +216,39 @@ These are not bugs; the data simply is not available:
 Issues and pull requests are welcome. The source comments are in Dutch; the
 interface is available in both Dutch and English.
 
+## ⚖️ Legal disclaimer
+
+This project is an unofficial, community-made overlay and third-party tool.
+It is built on publicly available data from the **SCS Telemetry SDK**, the
+**TruckersMP Client SDK** and the **public TruckersMP Web API**.
+
+**No affiliation.** This project is not affiliated with, endorsed by,
+sponsored by, or connected in any way with SCS Software or TruckersMP.
+
+**Trademarks.** "Euro Truck Simulator 2", "SCS Software" and "TruckersMP",
+including all associated logos, names and images, are the exclusive property
+and trademarks of their respective owners. They are used here only to
+describe what this plugin works with.
+
+**No advantage.** CabNavi does not modify the game, does not change how you
+appear to other players, and gives no advantage in traffic or in jobs. It
+only shows information the game already provides to you.
+
+**Use at your own risk.** This software is provided "as is", without any
+warranty. It is meant for loyal ETS2 and TruckersMP players. If you tamper
+with the software yourself and that causes technical problems, or if you
+modify it and end up banned on TruckersMP, that is on you and not on the
+developer. Always follow the official TruckersMP rules, and drive by them
+too. See sections 15 and 16 of the GPL-3.0 for the full legal wording.
+
+**If something breaks.** Plugins run inside the game process. If the game
+starts behaving oddly, remove `cabnavi.dll` from the plugins folder and check
+whether the problem goes away before reporting it elsewhere.
+
+**Your data stays yours.** Nothing is uploaded anywhere. Network requests go
+to `api.truckersmp.com` only when you switch that on, and to a Discord
+webhook only if you configure one yourself.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
