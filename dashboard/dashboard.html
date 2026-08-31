@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rittenlogboek — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --asfalt-0:#0e1013;
+    --asfalt-1:#171a1f;
+    --asfalt-2:#20242b;
+    --streep:#3a3f47;
+    --wit:#e9e7df;
+    --grijs:#9aa0aa;
+    --amber:#f2a33d;
+    --amber-dim:#7a5a2c;
+    --diesel-groen:#3fb08a;
+    --alarm:#e2554a;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--asfalt-0);color:var(--wit);font-family:'Inter',sans-serif;}
+  body{
+    background-image:
+      repeating-linear-gradient(180deg, transparent 0 78px, rgba(255,255,255,0.02) 78px 80px);
+  }
+
+  .snelweg-lijn{
+    height:3px;width:100%;
+    background:repeating-linear-gradient(90deg, var(--amber) 0 28px, transparent 28px 52px);
+    opacity:.85;
+  }
+
+  header{
+    padding:36px 48px 20px;
+    display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap;
+  }
+  .titelblok .eyebrow{
+    font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--amber); margin:0 0 6px;
+  }
+  h1{
+    font-family:'Barlow Condensed',sans-serif; font-weight:700; font-size:52px; line-height:.95;
+    margin:0; letter-spacing:.01em;
+  }
+  .sub{color:var(--grijs); margin-top:8px; font-size:15px; max-width:520px;}
+
+  .laad-knop{
+    font-family:'JetBrains Mono',monospace; font-size:13px; letter-spacing:.04em;
+    background:var(--amber); color:#1c1305; border:none; padding:14px 22px;
+    border-radius:2px; cursor:pointer; font-weight:700; text-transform:uppercase;
+  }
+  .laad-knop:hover{background:#ffb955;}
+  input[type=file]{display:none;}
+
+  main{padding:0 48px 60px;}
+
+  .lege-staat{
+    margin-top:40px; padding:56px 40px; border:1px dashed var(--streep); border-radius:4px;
+    text-align:center; color:var(--grijs);
+  }
+  .lege-staat .groot{font-family:'Barlow Condensed',sans-serif; font-size:26px; color:var(--wit); margin-bottom:8px;}
+
+  .cluster{
+    display:grid; grid-template-columns:repeat(3, 1fr); gap:1px;
+    background:var(--streep); border:1px solid var(--streep); margin:28px 0 40px;
+  }
+  .gauge{
+    background:var(--asfalt-1); padding:22px 24px; position:relative;
+  }
+  .gauge .label{font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--grijs);}
+  .gauge .waarde{font-family:'JetBrains Mono',monospace; font-weight:700; font-size:34px; margin-top:10px; color:var(--wit);}
+  .gauge .waarde .eenheid{font-size:15px; color:var(--grijs); font-weight:500; margin-left:4px;}
+  .gauge.amber .waarde{color:var(--amber);}
+  .gauge.groen .waarde{color:var(--diesel-groen);}
+
+  .paneel{
+    background:var(--asfalt-1); border:1px solid var(--streep); margin-bottom:28px;
+  }
+  .paneel-kop{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:16px 22px; border-bottom:1px solid var(--streep);
+  }
+  .paneel-kop h2{
+    font-family:'Barlow Condensed',sans-serif; font-size:22px; margin:0; font-weight:600; letter-spacing:.02em;
+  }
+  .toggle-groep{display:flex; gap:6px;}
+  .toggle{
+    font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--grijs); background:transparent; border:1px solid var(--streep); padding:7px 12px; border-radius:2px; cursor:pointer;
+  }
+  .toggle.actief{border-color:var(--amber); color:var(--amber);}
+
+  canvas{display:block; width:100%; height:180px;}
+  .grafiek-wrap{padding:20px 22px 8px;}
+
+  table{width:100%; border-collapse:collapse; font-size:14px;}
+  thead th{
+    text-align:left; font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--grijs); padding:12px 22px; border-bottom:1px solid var(--streep); font-weight:500;
+  }
+  tbody td{padding:13px 22px; border-bottom:1px solid rgba(255,255,255,0.05);}
+  tbody tr:hover{background:rgba(255,255,255,0.02);}
+  .badge{
+    font-family:'JetBrains Mono',monospace; font-size:11px; padding:3px 8px; border-radius:2px; letter-spacing:.04em;
+  }
+  .badge.vracht{background:rgba(242,163,61,0.14); color:var(--amber);}
+  .badge.bus{background:rgba(63,176,138,0.14); color:var(--diesel-groen);}
+  .status-voltooid{color:var(--diesel-groen);}
+  .status-geannuleerd{color:var(--alarm);}
+  td.num{font-family:'JetBrains Mono',monospace; text-align:right;}
+  th.num{text-align:right;}
+
+  footer{padding:20px 48px 40px; color:var(--grijs); font-size:12px; font-family:'JetBrains Mono',monospace;}
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="titelblok">
+      <p class="eyebrow">Ritten Overlay — Logboek</p>
+      <h1>Jouw route,<br>op papier gezet.</h1>
+      <p class="sub">Open het bestand <code>%APPDATA%\RittenOverlay\trips.jsonl</code> (aangemaakt door de plugin) om je vracht- en buslijnritten hier te bekijken.</p>
+    </div>
+    <div>
+      <label class="laad-knop" for="bestandInvoer">Trips.jsonl openen</label>
+      <input type="file" id="bestandInvoer" accept=".jsonl,.txt,.json">
+    </div>
+  </header>
+  <div class="snelweg-lijn"></div>
+
+  <main id="main">
+    <div class="lege-staat" id="legeStaat">
+      <div class="groot">Nog geen bestand geladen</div>
+      <div>Klik op "Trips.jsonl openen" hierboven en kies het logboek-bestand van de plugin.</div>
+    </div>
+
+    <div id="inhoud" style="display:none;">
+      <div class="cluster" id="cluster"></div>
+
+      <div class="paneel">
+        <div class="paneel-kop">
+          <h2>Afstand per rit</h2>
+          <div class="toggle-groep">
+            <button class="toggle actief" data-filter="alles">Alles</button>
+            <button class="toggle" data-filter="vracht">Vracht</button>
+            <button class="toggle" data-filter="bus">Bus</button>
+          </div>
+        </div>
+        <div class="grafiek-wrap"><canvas id="grafiek"></canvas></div>
+      </div>
+
+      <div class="paneel">
+        <div class="paneel-kop"><h2>Ritgeschiedenis</h2></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th><th>Route / lijn</th><th>Server</th>
+              <th class="num">Afstand</th><th class="num">Opbrengst</th><th class="num">Brandstof</th><th>Status</th><th>Afgerond</th>
+            </tr>
+          </thead>
+          <tbody id="tabelBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <footer>RITTEN OVERLAY // lokaal dashboard, verwerkt alles in je browser — er wordt niets verstuurd</footer>
+
+<script>
+let alleRitten = [];
+let actiefFilter = 'alles';
+
+document.getElementById('bestandInvoer').addEventListener('change', (e) => {
+  const bestand = e.target.files[0];
+  if(!bestand) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => verwerkBestand(ev.target.result);
+  reader.readAsText(bestand);
+});
+
+function verwerkBestand(tekst){
+  const regels = tekst.split('\n').map(r => r.trim()).filter(Boolean);
+  alleRitten = [];
+  for(const regel of regels){
+    try{ alleRitten.push(JSON.parse(regel)); } catch(e){ /* corrupte regel, overslaan */ }
+  }
+  alleRitten.sort((a,b) => (a.eind_tijd||'').localeCompare(b.eind_tijd||''));
+
+  document.getElementById('legeStaat').style.display = 'none';
+  document.getElementById('inhoud').style.display = 'block';
+  render();
+}
+
+document.querySelectorAll('.toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.toggle').forEach(b => b.classList.remove('actief'));
+    btn.classList.add('actief');
+    actiefFilter = btn.dataset.filter;
+    render();
+  });
+});
+
+function gefilterd(){
+  if(actiefFilter === 'alles') return alleRitten;
+  return alleRitten.filter(r => r.type === actiefFilter);
+}
+
+function render(){
+  const ritten = gefilterd();
+
+  const vracht = alleRitten.filter(r => r.type === 'vracht');
+  const bus = alleRitten.filter(r => r.type === 'bus');
+  const totaalKm = alleRitten.reduce((s,r) => s + (r.afgelegde_afstand_km||0), 0);
+  const totaalInkomen = alleRitten.reduce((s,r) => s + (r.inkomen || r.geschatte_uitbetaling || 0), 0);
+  const totaalBrandstof = alleRitten.reduce((s,r) => s + (r.brandstof_kosten_euro || 0), 0);
+
+  document.getElementById('cluster').innerHTML = `
+    ${gaugeHtml('Vrachtritten', vracht.length, '', 'amber')}
+    ${gaugeHtml('Buslijnritten', bus.length, '', 'groen')}
+    ${gaugeHtml('Totale afstand', Math.round(totaalKm).toLocaleString('nl-NL'), 'km', '')}
+    ${gaugeHtml('Totaal verdiend', Math.round(totaalInkomen).toLocaleString('nl-NL'), '', '')}
+    ${gaugeHtml('Brandstofkosten', '€' + totaalBrandstof.toFixed(0), '', '')}
+    ${gaugeHtml('Netto resultaat', '€' + Math.round(totaalInkomen - totaalBrandstof).toLocaleString('nl-NL'), '', 'groen')}
+  `;
+
+  const body = document.getElementById('tabelBody');
+  body.innerHTML = ritten.slice().reverse().map(r => `
+    <tr>
+      <td><span class="badge ${r.type}">${r.type === 'bus' ? 'Bus' : 'Vracht'}</span></td>
+      <td>${r.type === 'bus'
+            ? `${(r.haltes||[]).length} haltes`
+            : `${r.bron_stad||'-'} → ${r.bestemming_stad||'-'}`}</td>
+      <td>${r.server || '—'}</td>
+      <td class="num">${Math.round(r.afgelegde_afstand_km||0).toLocaleString('nl-NL')} km</td>
+      <td class="num">${Math.round(r.inkomen || r.geschatte_uitbetaling || 0).toLocaleString('nl-NL')}</td>
+      <td class="num">€${(r.brandstof_kosten_euro||0).toFixed(2)}</td>
+      <td class="status-${r.status}">${r.status === 'voltooid' ? 'Voltooid' : 'Geannuleerd'}</td>
+      <td>${(r.eind_tijd||'').replace('T',' ').replace('Z','')}</td>
+    </tr>
+  `).join('') || `<tr><td colspan="8" style="color:var(--grijs); text-align:center; padding:30px;">Geen ritten in dit filter.</td></tr>`;
+
+  tekenGrafiek(ritten);
+}
+
+function gaugeHtml(label, waarde, eenheid, kleurklasse){
+  return `<div class="gauge ${kleurklasse}">
+      <div class="label">${label}</div>
+      <div class="waarde">${waarde}${eenheid ? `<span class="eenheid">${eenheid}</span>` : ''}</div>
+    </div>`;
+}
+
+function tekenGrafiek(ritten){
+  const canvas = document.getElementById('grafiek');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = 180;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+
+  if(ritten.length === 0) return;
+
+  const waarden = ritten.map(r => r.afgelegde_afstand_km || 0);
+  const max = Math.max(...waarden, 1);
+  const padL = 4, padR = 4, padT = 14, padB = 14;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  const stapX = ritten.length > 1 ? plotW / (ritten.length - 1) : 0;
+
+  // hulplijnen zoals rijstrookmarkeringen
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  for(let i=1;i<4;i++){
+    const y = padT + plotH * (i/4);
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ritten.forEach((r,i) => {
+    const x = padL + stapX * i;
+    const y = padT + plotH - (waarden[i]/max)*plotH;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  });
+  ctx.strokeStyle = '#f2a33d';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ritten.forEach((r,i) => {
+    const x = padL + stapX * i;
+    const y = padT + plotH - (waarden[i]/max)*plotH;
+    ctx.beginPath();
+    ctx.arc(x,y,3,0,Math.PI*2);
+    ctx.fillStyle = r.type === 'bus' ? '#3fb08a' : '#f2a33d';
+    ctx.fill();
+  });
+}
+
+window.addEventListener('resize', () => { if(alleRitten.length) render(); });
+</script>
+</body>
+</html>
