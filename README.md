@@ -147,9 +147,7 @@ Dear ImGui, nlohmann/json and stb_image are fetched automatically by CMake.
 **Configure and build**
 
 ```bat
-cmake -B build -A x64 ^
-      -DTMP_SDK_DIR="C:\path\to\GameClientSDK\include" ^
-      -DSCS_SDK_DIR="C:\path\to\scs_sdk\include"
+cmake -B build -A x64 -DTMP_SDK_DIR="C:\path\to\GameClientSDK\include" -DSCS_SDK_DIR="C:\path\to\scs_sdk\include"
 
 cmake --build build --config Release
 ```
