@@ -213,8 +213,8 @@ These are not bugs; the data simply is not available:
 
 ## Contributing
 
-Issues and pull requests are welcome. The source comments are in Dutch; the
-interface is available in both Dutch and English.
+Issues and pull requests are welcome. 
+The interface is available in both Dutch and English.
 
 ## ⚖️ Legal disclaimer
 
