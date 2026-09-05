@@ -27,6 +27,9 @@ typedef void (*scs_telemetry_channel_callback_t)(const scs_string_t, scs_u32_t, 
 typedef void (*scs_telemetry_event_callback_t)(const scs_event_t, const void*, scs_context_t);
 struct scs_telemetry_common_init_params_t {
     void (*log)(int, const char*);
+    scs_string_t game_name;   // real header: scs_string_t game_name/game_id, scs_u32_t game_version
+    scs_string_t game_id;
+    scs_u32_t game_version;
 };
 struct scs_telemetry_init_params_v101_t {
     scs_telemetry_common_init_params_t common;

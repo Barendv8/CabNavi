@@ -1,25 +1,27 @@
 #pragma once
 // Logboek.hxx
 //
-// Eén plek waar alles heen geschreven wordt wat we bij een probleem willen
-// terugzien. Schrijft naar %APPDATA%\CabNavi\debug.log.
+// One place where everything is written that we want to see again when
+// something goes wrong. Writes to %APPDATA%\CabNavi\debug.log.
 //
-// Waarom dit bestaat: de crash van 30 augustus was een leesfout buiten een
-// tabel, en het enige spoor was een adres in het spellog. Met een spoor van
-// waar de overlay mee bezig was, is dat soort dingen in één blik te vinden.
+// Why this exists: the crash of 30 August was an out-of-bounds read in a
+// table, and the only trace was an address in the game log. With a trail
+// of what the overlay was doing, that kind of thing is found at a glance.
 //
-// Drie soorten regels:
+// Three kinds of lines:
 //
-//   [start]   eenmalig bij het opstarten -- versies, kanalen, bestanden
-//   [gebeurt] iets noemenswaardigs: een rit, een fout, een instelling
-//   [spoor]   waar de overlay was; wordt hooguit eens per twee seconden
-//             weggeschreven, zodat het niet elke frame naar schijf gaat
+//   [start]   once at startup -- versions, channels, files
+//   [event] something noteworthy: a trip, an error, a setting
+//   [trace]   where the overlay was; written at most once every two
+//             seconds, so it does not hit the disk every frame
 //
-// Bij een crash is de LAATSTE [spoor]-regel het startpunt van het zoeken.
+// After a crash the LAST [trace] line is where the search starts.
 
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -30,8 +32,8 @@ namespace Ritten
     class Logboek
     {
     public:
-        // Waar het bestand staat. Naast de andere instellingen, zodat een
-        // spel-update het niet opruimt.
+        // Where the file lives. Next to the other settings, so a game update
+        // does not clean it up.
         static std::filesystem::path Pad()
         {
             std::filesystem::path pad;
@@ -43,26 +45,84 @@ namespace Ritten
             return pad / "debug.log";
         }
 
-        // Uitgebreide diagnose aan of uit. Staat standaard UIT: de
-        // categorieen "verbruik", "vlaggen" en "vtc" schrijven elke paar
-        // seconden een regel, en dat hoef je alleen als er iets uitgezocht
-        // moet worden. Fouten en gebeurtenissen worden ALTIJD gelogd.
+        // Verbose diagnostics on or off. Default OFF: the categories
+        // "fuel", "flags" and "vtc" write a line every few seconds,
+        // and you only need that while investigating something. Errors and
+        // events are ALWAYS logged.
         static bool &Uitgebreid()
         {
             static bool aan = false;
             return aan;
         }
 
-        // Hoort deze categorie bij de uitgebreide diagnose?
+        // The ID of the thread we are running on right now. Only meant to
+        // establish whether two pieces of code run on the same thread; the
+        // number itself has no further meaning.
+        static unsigned long HuidigeThreadId()
+        {
+            return static_cast<unsigned long>(
+                std::hash<std::thread::id>{}( std::this_thread::get_id() ) & 0xFFFFFFFFu );
+        }
+
+        // Shorten a path for the log: everything up to and including the
+        // user folder is replaced by %APPDATA%. The full path contains your
+        // Windows user name, and debug.log gets shared easily -- on a forum,
+        // in a bug report. To investigate a problem you only need to know
+        // WHETHER the file is there.
+        static std::string KortPad( const std::filesystem::path &pad )
+        {
+            std::string s = pad.string();
+            const char *omgeving = std::getenv( "APPDATA" );
+            if( omgeving && *omgeving )
+            {
+                const std::string basis( omgeving );
+                if( s.rfind( basis, 0 ) == 0 )
+                {
+                    return "%APPDATA%" + s.substr( basis.size() );
+                }
+            }
+
+            // No APPDATA, or the path is outside it: then only show the last
+            // two parts, so a user name never ends up in the log.
+            const auto naam = pad.filename().string();
+            const auto map = pad.parent_path().filename().string();
+            return map.empty() ? naam : ( "..." + std::string( 1, pad.preferred_separator )
+                                          + map + std::string( 1, pad.preferred_separator ) + naam );
+        }
+
+        // Clean up an error message from the operating system. On file
+        // errors Windows puts the FULL path in the text, including
+        // C:\\Users\\<name>. Everything from that user folder onwards is cut.
+        static std::string KorteFout( const std::string &tekst )
+        {
+            std::string s = tekst;
+            const char *omgeving = std::getenv( "USERPROFILE" );
+            if( omgeving && *omgeving )
+            {
+                const std::string basis( omgeving );
+                for( std::size_t p = s.find( basis ); p != std::string::npos;
+                     p = s.find( basis ) )
+                {
+                    s.replace( p, basis.size(), "%USERPROFILE%" );
+                }
+            }
+            return s;
+        }
+
+        // Does this category belong to verbose diagnostics?
         static bool IsDiagnose( const char *categorie )
         {
             if( categorie == nullptr ) return false;
             const std::string c = categorie;
-            return ( c == "verbruik" || c == "vlaggen" || c == "vtc" );
+            // "trace" belongs here too. Without this, that category wrote a
+            // line every two seconds for EVERYONE -- measured: 1186 lines in a
+            // one-hour session. Pure diagnostics, so off by default.
+            return ( c == "fuel" || c == "flags" || c == "vtc" || c == "trace"
+                     || c == "bus" || c == "eta" );
         }
 
-        // Eén regel wegschrijven. Kan vanaf elke thread; het slot voorkomt
-        // dat twee regels door elkaar heen lopen.
+        // Write one line. May be called from any thread; the lock keeps two
+        // lines from interleaving.
         static void Schrijf( const char *categorie, const std::string &bericht )
         {
             if( IsDiagnose( categorie ) && !Uitgebreid() ) return;
@@ -75,13 +135,13 @@ namespace Ritten
             }
             catch( ... )
             {
-                // Loggen mag NOOIT zelf een probleem worden. Lukt het niet,
-                // dan gaat het spel gewoon door zonder logregel.
+                // Logging must NEVER become a problem itself. If it fails, the game
+                // simply continues without the log line.
             }
         }
 
-        // Het logboek leegmaken bij het opstarten, met een kopregel. Anders
-        // groeit het bestand eindeloos en weet je niet welke sessie je leest.
+        // Empty the log at startup, with a header line. Otherwise the file
+        // grows forever and you cannot tell which session you are reading.
         static void StartNieuweSessie( const std::string &kopregel )
         {
             try
@@ -96,8 +156,8 @@ namespace Ritten
             }
         }
 
-        // Waar zijn we mee bezig? Kost niets: alleen een pointer opslaan.
-        // Wordt hooguit eens per twee seconden naar schijf geschreven.
+        // What are we doing? Costs nothing: only a pointer is stored.
+        // Written to disk at most once every two seconds.
         static void Spoor( const char *waar )
         {
             HuidigSpoor() = waar;
@@ -106,10 +166,10 @@ namespace Ritten
             auto &laatst = LaatsteSpoorTijd();
             if( std::chrono::duration<double>( nu - laatst ).count() < 2.0 ) return;
             laatst = nu;
-            Schrijf( "spoor", waar );
+            Schrijf( "trace", waar );
         }
 
-        // De laatst bekende plek, voor in een foutmelding.
+        // The last known location, for use in an error message.
         static const char *LaatstBekend()
         {
             const char *s = HuidigSpoor();
@@ -142,9 +202,17 @@ namespace Ritten
         #else
             localtime_r( &nu, &tmBuf );
         #endif
+            // Milliseconds included. Needed to line up a screen recording with
+            // this log: a gear change takes about half a second, and without ms
+            // you cannot tell which line belongs to which frame.
+            const auto nuKlok = std::chrono::system_clock::now();
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                nuKlok.time_since_epoch() ).count() % 1000;
+
             char buf[ 32 ];
-            std::snprintf( buf, sizeof( buf ), "%02d:%02d:%02d",
-                            tmBuf.tm_hour, tmBuf.tm_min, tmBuf.tm_sec );
+            std::snprintf( buf, sizeof( buf ), "%02d:%02d:%02d.%03d",
+                            tmBuf.tm_hour, tmBuf.tm_min, tmBuf.tm_sec,
+                            static_cast<int>( ms ) );
             return buf;
         }
     };

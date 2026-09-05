@@ -1,6 +1,7 @@
 #include "BusTracking.hxx"
 
 #include "CallbackHulp.hxx"
+#include "Logboek.hxx"
 
 #include <algorithm>
 #include <chrono>
@@ -25,9 +26,9 @@ namespace Ritten
         return ss.str();
     }
 
-    // BusJobCancelledEvent::GetReason() geeft een genummerd type terug
-    // (TruckersMP::BusJobCancellationReason), geen tekst -- deze zet het om
-    // naar iets leesbaars voor het logboek/dashboard.
+    // BusJobCancelledEvent::GetReason() returns an enumerated type
+    // (TruckersMP::BusJobCancellationReason), not text -- this turns it
+    // into something readable for the log/dashboard.
     static std::string RedenAlsTekst( TruckersMP::BusJobCancellationReason reden )
     {
         using R = TruckersMP::BusJobCancellationReason;
@@ -47,18 +48,18 @@ namespace Ritten
         m_busModule = TruckersMP::BusModule::Attach( session );
         if( !m_busModule )
         {
-            // Bus-module niet beschikbaar (bv. oudere client, of intent niet
-            // ontgrendeld). Bus-tracking blijft dan simpelweg leeg;
-            // vracht-tracking werkt onafhankelijk.
+            // Bus module not available (e.g. older client, or intent not
+            // unlocked). Bus tracking then simply stays empty; cargo tracking
+            // works independently.
             return;
         }
 
-        // Mid-sessie start: als de plugin herlaadt terwijl er al een job
-        // loopt, meteen de huidige status oppikken (zie "Initialization and
-        // reloading" in de SDK-docs).
-        // Alleen oppakken als er ECHT een job is. Een leeg BusJob-object
-        // doorgeven en daar getters op aanroepen leest een ongeldige
-        // moduleverwijzing -- dezelfde valstrik als bij de spelersradar.
+        // Mid-session start: if the plugin reloads while a job is already
+        // running, pick up the current state right away (see "Initialization
+        // and reloading" in the SDK docs).
+        // Only pick it up if there REALLY is a job. Passing an empty BusJob
+        // object and calling getters on it reads an invalid module reference
+        // -- the same trap as with the player radar.
         if( const auto lopendeJob = m_busModule->GetJob() )
         {
             StartRecord( *lopendeJob );
@@ -68,6 +69,8 @@ namespace Ritten
         {
             StartRecord( e.GetJob() );
             m_huidigeRit.geschatUitbetaling = e.GetEstimatedPayout();
+            Logboek::Schrijf( "bus", "estimated payout at start: "
+                                        + std::to_string( m_huidigeRit.geschatUitbetaling ) );
         } ) );
 
         m_busModule->OnJobDataReady.Register( Beschermd( "OnJobDataReady", [ this ]( TruckersMP::BusJobDataReadyEvent &e )
@@ -79,18 +82,37 @@ namespace Ritten
             {
                 double afstandNaarDezeHalte = stops[ i ].GetPlannedDistance().value_or( 0.f );
                 cumulatief += afstandNaarDezeHalte;
-                m_huidigeRit.haltes[ i ].geplandeAfstandKm = cumulatief; // vanaf ritstart, cumulatief
+                m_huidigeRit.haltes[ i ].geplandeAfstandKm = cumulatief;  // from trip start, cumulative
                 m_huidigeRit.geplandeAfstandKm += afstandNaarDezeHalte;
 
-                // GetScheduledTime() is de tijd vanaf de VORIGE halte (zo staat
-                // het in de busmodule-docs), dus net als de afstand optellen.
+                // GetScheduledTime() is the time from the PREVIOUS stop (per the bus
+                // module docs), so add it up just like the distance.
                 cumulatiefTijd += static_cast<double>( stops[ i ].GetScheduledTime().value_or( 0u ) );
                 m_huidigeRit.haltes[ i ].geplandeTijdMin = cumulatiefTijd;
+                m_huidigeRit.haltes[ i ].instappers  = stops[ i ].GetBoardingPassengers().value_or( 0 );
+                m_huidigeRit.haltes[ i ].uitstappers = stops[ i ].GetLeavingPassengers().value_or( 0 );
+
+                // Record per stop what the game gives us. Needed to check afterwards
+                // whether the estimate to FURTHER stops is right: CabNavi computes
+                // that itself with this planned distance, while the next stop simply
+                // uses the GPS time.
+                Logboek::Schrijf( "bus", "  data stop " + std::to_string( i )
+                    + ": leg=" + std::to_string( afstandNaarDezeHalte ) + " km"
+                    + " cumulative=" + std::to_string( cumulatief ) + " km"
+                    + " legTime=" + std::to_string( stops[ i ].GetScheduledTime().value_or( 0u ) ) + " min"
+                    + " cumulativeTime=" + std::to_string( cumulatiefTijd ) + " min"
+                    + " boarding=" + std::to_string( stops[ i ].GetBoardingPassengers().value_or( 0 ) )
+                    + " alighting=" + std::to_string( stops[ i ].GetLeavingPassengers().value_or( 0 ) ) );
             }
         } ) );
 
         m_busModule->OnStopCompleted.Register( Beschermd( "OnStopCompleted", [ this ]( TruckersMP::BusStopCompletedEvent &e )
         {
+            // Update the number on board. GetPassengerCount() gives who is in
+            // the bus NOW, not a total for the trip -- so ask again after every
+            // stop, otherwise the figure sticks at the departure count.
+            m_huidigeRit.passagiers = e.GetJob().GetPassengerCount().value_or( m_huidigeRit.passagiers );
+
             const std::string identifier = e.GetStop().GetCityIdentifier().value_or( "" );
             for( StopInfo &stop : m_huidigeRit.haltes )
             {
@@ -101,7 +123,16 @@ namespace Ritten
                 stop.voltooid = true;
                 stop.afgelegdeAfstandKm = e.GetDrivenDistance();
                 m_huidigeRit.afgelegdeAfstandKm += stop.afgelegdeAfstandKm;
-                m_liveKmSindsLaatsteHalte = 0.0; // teller reset, deze etappe is nu officieel meegeteld
+                m_liveKmSindsLaatsteHalte = 0.0;  // counter reset, this leg is now officially counted
+
+                // Record the check-off moment, with the ELAPSED time since trip
+                // start. That lets a prediction from an earlier line be placed next
+                // to the actual moment.
+                Logboek::Schrijf( "bus", "stop COMPLETED: " + stop.naam
+                    + " (" + identifier + ")"
+                    + " driven=" + std::to_string( stop.afgelegdeAfstandKm ) + " km"
+                    + " planned=" + std::to_string( stop.geplandeAfstandKm ) + " km"
+                    + " elapsed=" + std::to_string( VerstrekenMinutenEcht() ) + " min real" );
                 break;
             }
         } ) );
@@ -112,6 +143,10 @@ namespace Ritten
             m_huidigeRit.eindTijdIso = NuAlsIso();
             m_huidigeRit.economyEindTijd = m_economyTijd;
             m_huidigeRit.geschatUitbetaling = e.GetPayout();
+            Logboek::Schrijf( "bus", "trip COMPLETED -- payout=" + std::to_string( m_huidigeRit.geschatUitbetaling )
+                                        + " driven=" + std::to_string( m_huidigeRit.afgelegdeAfstandKm ) + " km"
+                                        + " planned=" + std::to_string( m_huidigeRit.geplandeAfstandKm ) + " km"
+                                        + " duration=" + std::to_string( VerstrekenMinutenEcht() ) + " min real" );
             m_logger.RegisterVoltooideRit( m_huidigeRit );
             m_huidigeRit = Trip{};
             m_actief = false;
@@ -123,6 +158,7 @@ namespace Ritten
             m_huidigeRit.eindTijdIso = NuAlsIso();
             m_huidigeRit.economyEindTijd = m_economyTijd;
             m_huidigeRit.annuleringsReden = RedenAlsTekst( e.GetReason() );
+            Logboek::Schrijf( "bus", "trip CANCELLED -- reason=" + m_huidigeRit.annuleringsReden );
             m_logger.RegisterVoltooideRit( m_huidigeRit );
             m_huidigeRit = Trip{};
             m_actief = false;
@@ -142,12 +178,13 @@ namespace Ritten
         m_ritStartMoment = std::chrono::steady_clock::now();
         m_liveKmSindsLaatsteHalte = 0.0;
         m_snelheidVenster.clear();
-        m_gladdeSchattingMin = -1.0; // verse rit, verse schatting
+        m_gladdeSchattingMin = -1.0;  // fresh trip, fresh estimate
         m_huidigeRit.type = TripType::Bus;
         m_huidigeRit.status = TripStatus::Bezig;
         m_huidigeRit.id = "bus-" + NuAlsIso();
         m_huidigeRit.startTijdIso = NuAlsIso();
         m_huidigeRit.economyStartTijd = job.GetStartTime().value_or( 0 );
+        m_huidigeRit.passagiers = job.GetPassengerCount().value_or( 0 );
 
         for( const TruckersMP::BusStop &stop : job.GetStops().value_or( std::vector<TruckersMP::BusStop>{} ) )
         {
@@ -155,6 +192,16 @@ namespace Ritten
             info.naam = stop.GetName().value_or( "" );
             info.cityIdentifier = stop.GetCityIdentifier().value_or( "" );
             m_huidigeRit.haltes.push_back( std::move( info ) );
+        }
+
+        Logboek::Schrijf( "bus", "trip started -- stops=" + std::to_string( m_huidigeRit.haltes.size() )
+                                    + " passengers=" + std::to_string( job.GetPassengerCount().value_or( 0 ) )
+                                    + " economyStart=" + std::to_string( m_huidigeRit.economyStartTijd ) );
+        for( std::size_t i = 0; i < m_huidigeRit.haltes.size(); ++i )
+        {
+            Logboek::Schrijf( "bus", "  stop " + std::to_string( i ) + ": "
+                                        + m_huidigeRit.haltes[ i ].naam
+                                        + " (" + m_huidigeRit.haltes[ i ].cityIdentifier + ")" );
         }
     }
 
@@ -175,9 +222,9 @@ namespace Ritten
 
     void BusTracking::OpLiveSnelheid( double snelheidKmh, bool gepauzeerd )
     {
-        // Pauze-overgangen bijhouden, ongeacht of er een actieve rit is
-        // (net als bij vracht -- de simulatie pauzeert los van welke job je
-        // toevallig hebt).
+        // Track pause transitions regardless of whether there is an active
+        // trip (like cargo -- the simulation pauses independently of
+        // whichever job you happen to have).
         auto nu = std::chrono::steady_clock::now();
         if( gepauzeerd && !m_gepauzeerd )
         {
@@ -197,38 +244,56 @@ namespace Ritten
 
         m_huidigeRit.huidigeSnelheidKmh = snelheidKmh;
 
-        // Live kilometerteller sinds de laatste voltooide halte bijwerken
-        // (snelheid x verstreken tijd sinds vorige meting).
+        // Update the live odometer since the last completed stop (speed x
+        // elapsed time since the previous reading).
         if( m_laatsteSnelheidMeting.time_since_epoch().count() != 0 )
         {
             double verstrekenUur = std::chrono::duration<double>( nu - m_laatsteSnelheidMeting ).count() / 3600.0;
-            if( verstrekenUur > 0.0 && verstrekenUur < 0.1 ) // sanity check tegen rare sprongen
+            if( verstrekenUur > 0.0 && verstrekenUur < 0.1 )  // sanity check against odd jumps
             {
                 m_liveKmSindsLaatsteHalte += snelheidKmh * verstrekenUur;
             }
         }
         m_laatsteSnelheidMeting = nu;
 
-        // Voortschrijdend-gemiddelde-venster van snelheden bijwerken.
+        // Update the moving-average window of speeds.
         m_snelheidVenster.emplace_back( nu, snelheidKmh );
         while( !m_snelheidVenster.empty()
                && std::chrono::duration<double>( nu - m_snelheidVenster.front().first ).count() > VENSTER_SECONDEN )
         {
             m_snelheidVenster.pop_front();
         }
+
+        // Every ten seconds write the PREDICTION per stop. Without this you
+        // cannot check afterwards what was predicted while you were still on
+        // the way -- and that is exactly the question for stops beyond the
+        // next one, which CabNavi computes itself.
+        if( std::chrono::duration<double>( nu - m_laatsteHalteLog ).count() > LOG_INTERVAL_SECONDEN )
+        {
+            m_laatsteHalteLog = nu;
+            std::string regel = "prediction t=" + std::to_string( VerstrekenMinutenEcht() ) + " min real"
+                                + " speed=" + std::to_string( snelheidKmh );
+            for( std::size_t i = 0; i < m_huidigeRit.haltes.size(); ++i )
+            {
+                if( m_huidigeRit.haltes[ i ].voltooid ) continue;
+                regel += " | h" + std::to_string( i ) + "="
+                       + std::to_string( GeschatteMinutenTotHalte( i ) ) + "min";
+            }
+            Logboek::Schrijf( "bus", regel );
+        }
     }
 
     void BusTracking::ZetEconomyTijd( std::uint32_t minuten )
     {
-        // Alleen ijken op een ECHTE verandering: het kanaal ververst eens per
-        // economy-minuut, dus tussendoor dezelfde waarde meerdere keren zien
-        // zegt niets over de snelheid.
+        // Only calibrate on a REAL change: the channel refreshes once per
+        // economy minute, so seeing the same value several times in between
+        // says nothing about the speed.
         if( minuten != m_economyTijd )
         {
             const auto nu = std::chrono::steady_clock::now();
-            // Bij een grote sprong (serversynchronisatie, rust) opnieuw
-            // beginnen met meten, en het anker sowieso elke 15 minuten
-            // verversen -- anders blijft een oude sprong eeuwig doorwerken.
+            // On a big jump (server sync, rest) start measuring again, and
+            // refresh the anchor every 15 minutes anyway -- otherwise an old jump
+            // keeps having effect forever.
             const double stapSpel = static_cast<double>( minuten ) - static_cast<double>( m_economyTijd );
             const double sindsAnker = m_schaalGestart
                 ? std::chrono::duration<double>( nu - m_schaalEersteEcht ).count() / 60.0
@@ -245,16 +310,17 @@ namespace Ritten
 
     double BusTracking::TijdSchaal() const
     {
-        // Zie de uitleg bij TruckTracking::TijdSchaal: vaste TruckersMP-schaal
-        // als basis, meting alleen als correctie binnen geloofwaardige grenzen.
+        // See the explanation at TruckTracking::TijdSchaal: fixed TruckersMP
+        // scale as the base, measurement only as a correction within
+        // plausible bounds.
         constexpr double STANDAARD_SCHAAL = 6.0;
         if( m_vastgezetteSchaal > 0.0 ) return m_vastgezetteSchaal;
         if( !m_schaalGestart ) return STANDAARD_SCHAAL;
 
         const double echteMinuten =
             std::chrono::duration<double>( std::chrono::steady_clock::now() - m_schaalEersteEcht ).count() / 60.0;
-        // Onder een halve echte minuut is de meting te grof (het kanaal
-        // springt met hele minuten); dan liever niets beweren.
+        // Below half a real minute the measurement is too coarse (the channel
+        // jumps in whole minutes); then better to claim nothing.
         if( echteMinuten < 2.0 ) return STANDAARD_SCHAAL;
 
         const double economyMinuten =
@@ -262,11 +328,11 @@ namespace Ritten
         if( economyMinuten <= 0.0 ) return STANDAARD_SCHAAL;
 
         const double gemeten = economyMinuten / echteMinuten;
-        // Ruim genoeg voor TruckersMP (6) en singleplayer (~19); alles
-        // daarbuiten is een tijdsprong, geen echte schaal. Zie de uitleg bij
+        // Wide enough for TruckersMP (6) and singleplayer (~19); anything
+        // outside is a time jump, not a real scale. See the explanation at
         // TruckTracking::TijdSchaal.
         if( gemeten < 3.0 || gemeten > 25.0 ) return STANDAARD_SCHAAL;
-        if( echteMinuten >= 5.0 ) m_vastgezetteSchaal = gemeten; // vanaf nu vast
+        if( echteMinuten >= 5.0 ) m_vastgezetteSchaal = gemeten;  // locked from now on
         return gemeten;
     }
 
@@ -278,8 +344,8 @@ namespace Ritten
 
     double BusTracking::Gladstrijken( double ruweMinuten ) const
     {
-        // Zelfde opzet als bij de vrachtrit: geleidelijk bijsturen, maar een
-        // grote sprong meteen overnemen (nieuwe route, andere halte).
+        // Same setup as the cargo trip: adjust gradually, but take over a
+        // big jump immediately (new route, different stop).
         if( m_gladdeSchattingMin < 0.0 )
         {
             m_gladdeSchattingMin = ruweMinuten;
@@ -301,8 +367,8 @@ namespace Ritten
 
     double BusTracking::EffectieveSnelheidEcht() const
     {
-        // Zelfde keten als in GeschatteResterendeMinutenEcht, maar dan alleen
-        // het snelheidsdeel. Alles in km per ECHT uur.
+        // Same chain as in GeschatteResterendeMinutenEcht, but only the
+        // speed part. Everything in km per REAL hour.
         double v = 0.0;
         if( m_snelheidVenster.size() >= 2 )
         {
@@ -330,7 +396,7 @@ namespace Ritten
         if( !m_actief || index >= m_huidigeRit.haltes.size() ) return -1.0;
         if( m_huidigeRit.haltes[ index ].voltooid ) return -1.0;
 
-        // Eerstvolgende nog niet voltooide halte zoeken: die is ons vertrekpunt.
+        // Find the next stop not yet completed: that is our starting point.
         std::size_t eerstvolgende = m_huidigeRit.haltes.size();
         for( std::size_t i = 0; i < m_huidigeRit.haltes.size(); ++i )
         {
@@ -338,23 +404,23 @@ namespace Ritten
         }
         if( eerstvolgende >= m_huidigeRit.haltes.size() ) return -1.0;
 
-        // Tot die eerste halte gebruiken we de bestaande schatting -- inclusief
-        // de GPS-ETA, want daar navigeert het spel naartoe.
+        // Up to that first stop we use the existing estimate -- including the
+        // GPS ETA, because that is where the game navigates to.
         const double basis = GeschatteResterendeMinutenEcht();
         if( basis < 0.0 ) return -1.0;
         if( index == eerstvolgende ) return basis;
 
-        // Verderop: de extra afstand omrekenen. Die extra afstand is een
-        // verschil tussen twee GEPLANDE afstanden, dus die klopt sowieso --
-        // daar speelt onze eigen kilometerteller geen rol in.
+        // Further on: convert the extra distance. That extra distance is a
+        // difference between two PLANNED distances, so it is correct anyway
+        // -- our own odometer plays no role there.
         const double extraKm = m_huidigeRit.haltes[ index ].geplandeAfstandKm
                                 - m_huidigeRit.haltes[ eerstvolgende ].geplandeAfstandKm;
         if( extraKm <= 0.0 ) return basis;
 
-        // Bij voorkeur de reissnelheid die uit de GPS volgt: die is stabieler
-        // dan onze eigen meting en verandert niet als je bij een halte
-        // stilstaat. Zelfde bron als de schatting tot de eerstvolgende halte,
-        // zodat de tijden onderling kloppen.
+        // Preferably the travel speed that follows from the GPS: more stable
+        // than our own measurement and does not change when you stand at a
+        // stop. Same source as the estimate to the next stop, so the times
+        // agree with each other.
         double snelheidEcht = 0.0;
         if( m_navTijdRuw > 0.0 && m_navAfstandKm > 1.0 )
         {
@@ -362,7 +428,7 @@ namespace Ritten
             const double kmhSpel = spelUren > 0.0 ? m_navAfstandKm / spelUren : 0.0;
             if( kmhSpel >= 3.0 && kmhSpel <= 200.0 )
             {
-                snelheidEcht = kmhSpel * TijdSchaal(); // km per ECHT uur
+                snelheidEcht = kmhSpel * TijdSchaal();  // km per REAL hour
             }
         }
         if( snelheidEcht <= 0.0 ) snelheidEcht = EffectieveSnelheidEcht();
@@ -374,10 +440,10 @@ namespace Ritten
     {
         if( !m_actief || m_huidigeRit.haltes.empty() ) return -1e9;
 
-        // Deadline = starttijd + geplande tijd tot de LAATSTE halte. Alleen
-        // die telt voor de boete.
+        // Deadline = start time + planned time to the LAST stop. Only that
+        // one counts for the penalty.
         const double geplandTotEind = m_huidigeRit.haltes.back().geplandeTijdMin;
-        if( geplandTotEind <= 0.0 ) return -1e9; // navigatiedata nog niet klaar
+        if( geplandTotEind <= 0.0 ) return -1e9;  // navigation data not ready yet
 
         const double deadline =
             static_cast<double>( m_huidigeRit.economyStartTijd ) + geplandTotEind;
@@ -387,13 +453,14 @@ namespace Ritten
             m_huidigeRit.geplandeAfstandKm - m_huidigeRit.afgelegdeAfstandKm - m_liveKmSindsLaatsteHalte;
         if( resterendeKm <= 0.0 )
         {
-            // Al bij het eindpunt: vertraging is puur het verschil met de deadline.
+            // Already at the end point: delay is purely the difference with the
+            // deadline.
             return economyNu - deadline;
         }
 
-        // EffectieveSnelheidEcht() geeft km per ECHT uur; delen door de
-        // tijdschaal-omrekening levert weer spelminuten, want de deadline
-        // staat ook in spelminuten.
+        // EffectieveSnelheidEcht() gives km per REAL hour; dividing by the
+        // time-scale conversion gives game minutes again, because the
+        // deadline is in game minutes too.
         const double vEcht = EffectieveSnelheidEcht();
         if( vEcht <= 0.0 ) return -1e9;
 
@@ -407,13 +474,13 @@ namespace Ritten
     double BusTracking::GeschatteBoetePercentage() const
     {
         const double vertraging = GeschatteVertragingMinuten();
-        if( vertraging <= -1e8 ) return 0.0; // niet te bepalen
+        if( vertraging <= -1e8 ) return 0.0;  // not determinable
 
-        // Eerste 60 minuten zijn gratis.
+        // First 60 minutes are free.
         const double strafbaar = vertraging - 60.0;
         if( strafbaar <= 0.0 ) return 0.0;
 
-        // 0,333% per minuut, afgetopt op 100% (na ~300 strafbare minuten).
+        // 0.333% per minute, capped at 100% (after ~300 penalised minutes).
         return std::min( 100.0, strafbaar * 0.333 );
     }
 
@@ -421,8 +488,8 @@ namespace Ritten
     {
         if( !m_actief ) return -1.0;
 
-        // Resterende afstand tot de eerstvolgende niet-voltooide halte
-        // (niet tot het eindpunt van de hele lijn -- per-halte is nuttiger).
+        // Remaining distance to the next uncompleted stop (not to the end
+        // point of the whole line -- per stop is more useful).
         double geplandTotEerstvolgende = -1.0;
         for( const StopInfo &s : m_huidigeRit.haltes )
         {
@@ -432,32 +499,30 @@ namespace Ritten
                 break;
             }
         }
-        if( geplandTotEerstvolgende < 0.0 ) return -1.0; // alle haltes al voltooid
+        if( geplandTotEerstvolgende < 0.0 ) return -1.0;  // all stops already completed
 
-        // BELANGRIJK -- hier zit het verschil met de vrachtrit.
+        // IMPORTANT -- this is where the bus differs from the cargo trip.
         //
-        // Bij een vrachtrit wijst de navigatie naar je bestemming, dus daar
-        // kun je navigation.distance en navigation.time rechtstreeks
-        // gebruiken. Bij een BUSLIJN wijst de navigatie naar het EINDPUNT van
-        // de lijn: het spel meldde 374 km en 3u05 terwijl de eerstvolgende
-        // halte op 1 km lag. Die getallen als "tot de volgende halte" nemen
-        // gaf 31 minuten voor een ritje van een minuut.
+        // On a cargo trip the navigation points to your destination, so
+        // navigation.distance and navigation.time can be used directly. On a
+        // BUS LINE the navigation points to the END POINT of the line: the
+        // game reported 374 km and 3h05 while the next stop was 1 km away.
+        // Taking those numbers as "to the next stop" gave 31 minutes for a
+        // one-minute hop.
         //
-        // De afstand tot de volgende halte komt daarom uit onze eigen
-        // boekhouding. De GPS gebruiken we hieronder alleen nog voor de
-        // SNELHEID die eruit volgt -- dat is wel bruikbaar, want die geldt
-        // voor de hele route.
-        // Hoeveel is er al gereden? Onze eigen optelsom bleek niet te
-        // vertrouwen: bij aankomst in Amsterdam stond die nog op nul, terwijl
-        // er 156 km op zat. Daarom leiden we het af uit de GPS, die het wel
-        // weet:
+        // The distance to the next stop therefore comes from our own
+        // bookkeeping. Below, the GPS is only used for the SPEED that follows
+        // from it -- that is usable, because it holds for the whole route.
+        // How much has been driven already? Our own sum proved unreliable: at
+        // arrival in Amsterdam it was still zero with 156 km behind us. So we
+        // derive it from the GPS, which does know:
         //
-        //   gereden = totale lijnlengte - wat de GPS nog te gaan geeft
+        //   driven = total line length - what the GPS still has to go
         //
-        // De GPS-afstand gaat naar het EINDPUNT van de lijn, en de geplande
-        // afstand van de laatste halte is precies datzelfde eindpunt -- dus
-        // die twee horen bij elkaar. Alleen als de GPS zwijgt vallen we terug
-        // op onze eigen teller.
+        // The GPS distance goes to the END POINT of the line, and the planned
+        // distance of the last stop is exactly that same end point -- so the
+        // two belong together. Only when the GPS is silent do we fall back on
+        // our own counter.
         double gereden;
         const double geplandTotEind = m_huidigeRit.haltes.back().geplandeAfstandKm;
         if( m_navAfstandKm >= 0.0 && geplandTotEind > 1.0 )
@@ -471,35 +536,35 @@ namespace Ritten
         }
 
         double resterendeKm = geplandTotEerstvolgende - gereden;
-        // Onder de 300 meter sta je er praktisch bovenop; dan is "0 min" een
-        // eerlijker antwoord dan een minuut of twee die de GPS nog overhoudt.
+        // Below 300 metres you are practically on top of it; then "0 min" is
+        // a more honest answer than the minute or two the GPS still holds.
         if( resterendeKm <= 0.3 ) return 0.0;
 
-        // ---- Bron 0: de reissnelheid die uit de GPS volgt ---------------
+        // ---- Source 0: the travel speed that follows from the GPS ---------
         //
-        // HIER WIJKT DE BUS AF VAN DE VRACHTRIT, en dat moet ook.
+        // HERE THE BUS DEVIATES FROM THE CARGO TRIP, and it has to.
         //
-        // Bij een vrachtrit wijst de navigatie naar je bestemming, dus daar
-        // kun je navigation.time rechtstreeks als "tijd tot aankomst" nemen.
-        // Bij een BUSLIJN wijst de navigatie naar het EINDPUNT van de lijn:
-        // het spel meldde 374 km en 3u05 terwijl de eerstvolgende halte op
-        // 1 km lag. Die tijd overnemen gaf 31 minuten voor een ritje van een
-        // minuut -- de afstand deed dan helemaal niet mee.
+        // On a cargo trip the navigation points to your destination, so
+        // navigation.time can be taken directly as "time to arrival". On a
+        // BUS LINE the navigation points to the END POINT of the line: the
+        // game reported 374 km and 3h05 while the next stop was 1 km away.
+        // Taking that time gave 31 minutes for a one-minute hop -- the
+        // distance did not matter at all.
         //
-        // Wat we WEL uit de GPS halen is de VERHOUDING afstand/tijd. Dat is
-        // de snelheid waarmee het spel rekent, en die geldt voor de hele
-        // route. Daarmee rekenen we onze eigen afstand tot de volgende halte
-        // om. Stabieler dan onze eigen snelheidsmeting, want die verhouding
-        // verandert niet als je bij een halte stilstaat.
+        // What we DO take from the GPS is the RATIO distance/time. That is
+        // the speed the game reckons with, and it holds for the whole route.
+        // With it we convert our own distance to the next stop. More stable
+        // than our own speed reading, because that ratio does not change
+        // when you stand at a stop.
         if( m_navTijdRuw > 0.0 && m_navAfstandKm > 1.0 )
         {
             const double schaal = TijdSchaal();
-            const double spelUren = m_navTijdRuw / 3600.0; // aanname: seconden
+            const double spelUren = m_navTijdRuw / 3600.0;  // assumption: seconds
 
             double snelheid = spelUren > 0.0 ? m_navAfstandKm / spelUren : 0.0;
             if( snelheid < 3.0 || snelheid > 200.0 )
             {
-                // Onmogelijke snelheid -> waarschijnlijk toch minuten.
+                // Impossible speed -> probably minutes after all.
                 const double alsMinuten = m_navTijdRuw / 60.0;
                 const double snelheidMin = alsMinuten > 0.0 ? m_navAfstandKm / alsMinuten : 0.0;
                 if( snelheidMin >= 3.0 && snelheidMin <= 200.0 ) snelheid = snelheidMin;
@@ -507,18 +572,18 @@ namespace Ritten
 
             if( snelheid >= 3.0 && snelheid <= 200.0 )
             {
-                // Snelheid is km per SPELuur; delen door de tijdschaal maakt
-                // er echte minuten van.
+                // Speed is km per GAME hour; dividing by the time scale makes real
+                // minutes of it.
                 return Gladstrijken( ( resterendeKm / snelheid ) * 60.0 / schaal );
             }
         }
 
         double gemiddeldeSnelheid = 0.0;
 
-        // 1) Bij voorkeur: voortschrijdend gemiddelde van de laatste ~3
-        //    minuten. Bij de bus is dat een venster van snelheidsmetingen;
-        //    die staan in km per SPELuur, dus we rekenen ze om naar km per
-        //    ECHT uur -- zodat de eenheid gelijk is aan die van de vrachtrit.
+        // 1) Preferably: moving average of the last ~3 minutes. For the bus
+        //    that is a window of speed readings; they are in km per GAME
+        //    hour, so we convert to km per REAL hour -- so the unit matches
+        //    the cargo trip.
         if( m_snelheidVenster.size() >= 2 )
         {
             double som = 0.0;
@@ -526,7 +591,7 @@ namespace Ritten
             gemiddeldeSnelheid = ( som / m_snelheidVenster.size() ) * TijdSchaal();
         }
 
-        // 2) Anders: gemiddelde over de hele rit tot nu toe.
+        // 2) Otherwise: average over the whole trip so far.
         if( gemiddeldeSnelheid < 1.0 )
         {
             const double verstrekenMin = VerstrekenMinutenEcht();
@@ -537,21 +602,21 @@ namespace Ritten
             }
         }
 
-        // 3) Anders: de snelheidsmeter van dit moment, omgerekend naar km per
-        //    ECHT uur. Die twee door elkaar halen scheelt een factor zes.
+        // 3) Otherwise: the speedometer at this moment, converted to km per
+        //    REAL hour. Mixing those two up is off by a factor of six.
         if( gemiddeldeSnelheid < 1.0 )
         {
             gemiddeldeSnelheid = m_huidigeRit.huidigeSnelheidKmh * TijdSchaal();
         }
 
-        // Bodem onder de snelheid. Zonder dit deelt een stilstaande bus (bij
-        // een halte) door bijna nul en krijg je onzin -- of "onbekend".
-        const double BODEM_SNELHEID_ECHT = 40.0 * TijdSchaal(); // 40 km/h op de meter
+        // Floor under the speed. Without this a bus standing still (at a
+        // stop) divides by almost zero and you get nonsense -- or "unknown".
+        const double BODEM_SNELHEID_ECHT = 40.0 * TijdSchaal();  // 40 km/h on the speedometer
         if( gemiddeldeSnelheid < BODEM_SNELHEID_ECHT )
         {
             if( m_gladdeSchattingMin > 0.0 )
             {
-                return m_gladdeSchattingMin; // laatst bekende waarde vasthouden
+                return m_gladdeSchattingMin;  // keep the last known value
             }
             gemiddeldeSnelheid = BODEM_SNELHEID_ECHT;
         }

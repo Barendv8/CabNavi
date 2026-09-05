@@ -1,19 +1,19 @@
 #pragma once
 // WebApi.hxx
 //
-// Haalt gegevens op bij de publieke TruckersMP Web API
-// (https://api.truckersmp.com/v2). Geen sleutel of inlog nodig.
+// Fetches data from the public TruckersMP Web API
+// (https://api.truckersmp.com/v2). No key or login needed.
 //
-// Twee regels waar dit zich aan houdt:
+// Two rules this sticks to:
 //
-//  1. NOOIT op de spelthread. Netwerkverkeer duurt honderden milliseconden;
-//     dat zou het spel laten haperen. Alles gebeurt op een eigen thread, net
-//     als bij de Discord-webhook. De overlay leest alleen een kopie van het
-//     laatste antwoord.
+//  1. NEVER on the game thread. Network traffic takes hundreds of
+//     milliseconds; that would make the game stutter. Everything happens on
+//     its own thread, like the Discord webhook. The overlay only reads a
+//     copy of the last answer.
 //
-//  2. Rustig aan. Dit is community-data, geen telemetrie. Serverstatus eens
-//     per minuut en evenementen eens per kwartier is ruim voldoende. Vaker
-//     vragen levert niets op en belast hun servers onnodig.
+//  2. Take it easy. This is community data, not telemetry. Server status
+//     once a minute and events once a quarter hour is plenty. Asking more
+//     often gains nothing and burdens their servers needlessly.
 
 #include <atomic>
 #include <chrono>
@@ -29,32 +29,32 @@
 
 namespace Ritten
 {
-    // Eén server zoals de API hem teruggeeft.
+    // One server as the API returns it.
     struct ServerInfo
     {
-        std::string naam;          // "Simulation 1"
-        std::string spel;          // "ETS2" of "ATS"
+        std::string naam;  // "Simulation 1"
+        std::string spel;  // "ETS2" or "ATS"
         int spelers = 0;
         int maxSpelers = 0;
         int wachtrij = 0;
         bool online = false;
-        bool collisions = false;   // botsingen aan of uit
+        bool collisions = false;  // collisions on or off
         bool snelheidsbegrenzer = false;
     };
 
-    // Eén aankomend evenement.
+    // One upcoming event.
     struct EvenementInfo
     {
-        int id = 0;                // TruckersMP-evenementnummer, om aan te vinken
+        int id = 0;  // TruckersMP event number, for ticking
         std::string naam;
-        std::string vertrek;       // stad van vertrek
-        std::string aankomst;      // stad van aankomst
-        std::string startTijd;     // zoals de API hem geeft (UTC)
+        std::string vertrek;  // departure city
+        std::string aankomst;  // arrival city
+        std::string startTijd;  // as the API gives it (UTC)
         std::string spel;
         std::string server;
     };
 
-    // Gegevens van één VTC, zoals /v2/vtc/{id} ze teruggeeft.
+    // Data of one VTC, as /v2/vtc/{id} returns it.
     struct VtcInfo
     {
         bool geldig = false;
@@ -62,16 +62,16 @@ namespace Ritten
         std::string tag;
         std::string slogan;
         std::string taal;
-        std::string werving;       // "Open" of "Close"
+        std::string werving;  // "Open" or "Close"
         int leden = 0;
         bool geverifieerd = false;
     };
 
-    // Eén nieuwsbericht van een VTC.
+    // One news item of a VTC.
     struct VtcNieuwsInfo
     {
         std::string titel;
-        std::string datum;         // published_at, zoals de API hem geeft
+        std::string datum;  // published_at, as the API gives it
         std::string auteur;
         bool vastgezet = false;
     };
@@ -82,77 +82,77 @@ namespace Ritten
         WebApi();
         ~WebApi();
 
-        // Aan/uit. Staat standaard UIT: netwerkverkeer hoort iets te zijn
-        // waar je zelf voor kiest, niet iets wat een plugin stiekem doet.
+        // On/off. Default OFF: network traffic should be something you choose
+        // yourself, not something a plugin does quietly.
         void ZetIngeschakeld( bool aan );
         bool Ingeschakeld() const { return m_aan.load(); }
 
-        // VTC-integratie. Apart aan te zetten, met een eigen nummer: dat
-        // staat in het adres van je VTC-pagina (truckersmp.com/vtc/<nummer>).
-        // 0 = geen VTC ingesteld; dan wordt er ook niets opgehaald.
+        // VTC integration. Switched on separately, with its own number: that
+        // is in the address of your VTC page (truckersmp.com/vtc/<number>).
+        // 0 = no VTC set; then nothing is fetched either.
         void ZetVtc( bool aan, int vtcId );
 
-        // Je eigen TruckersMP-ID (uit de SDK). Nodig om op te halen voor
-        // welke evenementen JIJ je hebt aangemeld -- zonder dit weten we
-        // alleen wat je VTC doet.
+        // Your own TruckersMP ID (from the SDK). Needed to fetch which events
+        // YOU signed up for -- without it we only know what your VTC does.
         void ZetEigenAccount( std::uint64_t accountId );
 
 
         bool VtcIngeschakeld() const { return m_vtcAan.load(); }
         int VtcId() const { return m_vtcId.load(); }
 
-        // --- VTC per speler ------------------------------------------------
-        // Het VTC-NUMMER is het enige echt unieke kenmerk: een tag is tekst
-        // die iedereen kan intypen, een nummer krijgt een bedrijf één keer
-        // van TruckersMP. Opvragen kost wel één verzoek per speler, dus dat
-        // gaat via een wachtrij op een rustig tempo, en het antwoord wordt
-        // onthouden -- iemands bedrijf verandert hooguit eens per maand.
+        // --- VTC per player ------------------------------------------------
+        // The VTC NUMBER is the only truly unique attribute: a tag is text
+        // anyone can type, a number is given to a company once by TruckersMP.
+        // Looking it up costs one request per player, so that goes through a
+        // queue at an easy pace, and the answer is remembered -- someone's
+        // company changes at most once a month.
         //
-        // Aanmelden gebeurt vanuit de overlay voor de spelers die in beeld
-        // zijn; al bekende of al aangemelde spelers worden overgeslagen.
-        // voorrang: dichtbij eerst. Die zie je toch als eerste op de radar,
-        // dus die wil je niet achteraan in de rij hebben staan.
+        // Enqueueing happens from the overlay for the players in view; already
+        // known or already enqueued players are skipped. Priority: nearby
+        // first. You see those first on the radar, so you do not want them at
+        // the back of the queue.
         void MeldSpelerAan( std::uint64_t accountId, bool voorrang = false );
 
-        // -1 = nog niet opgezocht, 0 = zit niet bij een VTC.
+        // -1 = not looked up yet, 0 = not in a VTC.
         int SpelerVtcId( std::uint64_t accountId ) const;
 
-        // Is deze speler patron volgens de Web API? -1 = nog niet opgezocht.
-        // GEMETEN 30-08: de SDK-vlag IsPatron blijft op false staan, ook bij
-        // iemand die aantoonbaar patron is. De API zegt het wel, en die
-        // vraag zit al in hetzelfde antwoord als het VTC-nummer -- dus dit
-        // kost geen extra verzoek.
+        // Is this player a patron according to the Web API? -1 = not looked
+        // up yet. MEASURED 30-08: the SDK flag IsPatron stays false, even for
+        // someone who demonstrably is a patron. The API does say it, and that
+        // question is already in the same answer as the VTC number -- so this
+        // costs no extra request.
         int SpelerIsPatron( std::uint64_t accountId ) const;
 
-        // Patron volgens de WEB API. De SDK heeft hier ook een vlag voor,
-        // maar die bleek onbetrouwbaar: een speler met een actieve Master
-        // Trucker-bijdrage kwam er als NIET-patron uit (gemeten 30-08).
-        // Het antwoord komt uit dezelfde opvraging als het VTC-nummer, dus
-        // dit kost geen extra verzoek.
-        // -1 = nog niet opgezocht, 0 = geen patron, 1 = wel.
+        // Patron according to the WEB API. The SDK has a flag for this too,
+        // but it proved unreliable: a player with an active Master Trucker
+        // contribution came out as NOT patron (measured 30-08). The answer
+        // comes from the same lookup as the VTC number, so this costs no
+        // extra request.
+        // -1 = not looked up yet, 0 = no patron, 1 = patron.
         int SpelerPatron( std::uint64_t accountId ) const;
 
-        // Voor de weergave: hoeveel spelers zijn er al opgezocht, en hoeveel
-        // staan er nog in de rij. Zonder dit moet je maar raden of het werkt.
+        // For the display: how many players have been looked up, and how
+        // many are still queued. Without this you can only guess whether it
+        // works.
         void OpzoekStand( int &opgezochtUit, int &inRijUit ) const;
 
-        // Kopieën van het laatste antwoord. Veilig vanaf de spelthread.
+        // Copies of the last answer. Safe from the game thread.
         std::vector<ServerInfo> Servers() const;
         std::vector<EvenementInfo> Evenementen() const;
         VtcInfo Vtc() const;
         std::vector<EvenementInfo> VtcEvenementen() const;
 
-        // Convooien waarvoor JIJ of je VTC zich heeft aangemeld. Alleen
-        // hieruit komt de herinnering op de Live-tab: een melding over een
-        // convooi waar je niks mee te maken hebt is alleen maar ruis.
+        // Convoys YOU or your VTC signed up for. Only from these does the
+        // reminder on the Live tab come: a notice about a convoy you have
+        // nothing to do with is just noise.
         std::vector<EvenementInfo> AangemeldeEvenementen() const;
 
-        // Alleen waar je VTC zich voor heeft aangemeld, los van jouw eigen
-        // aanmeldingen -- voor de lijst op het VTC-tabblad.
+        // Only what your VTC signed up for, apart from your own sign-ups --
+        // for the list on the VTC tab.
         std::vector<EvenementInfo> VtcAangemeld() const;
         std::vector<VtcNieuwsInfo> VtcNieuws() const;
 
-        // Voor de weergave: wanneer voor het laatst opgehaald, en of het lukte.
+        // For the display: when last fetched, and whether it succeeded.
         std::string Status() const;
         std::string VtcStatus() const;
 
@@ -174,7 +174,7 @@ namespace Ritten
         std::atomic<bool> m_aan{ false };
         std::atomic<bool> m_vtcAan{ false };
         std::atomic<int> m_vtcId{ 0 };
-        std::atomic<bool> m_vtcNuOphalen{ false }; // gezet door ZetVtc, zodat een wijziging meteen effect heeft
+        std::atomic<bool> m_vtcNuOphalen{ false };  // set by ZetVtc, so a change takes effect immediately
         std::atomic<bool> m_stoppen{ false };
         std::thread m_thread;
 
@@ -183,13 +183,13 @@ namespace Ritten
         std::vector<EvenementInfo> m_evenementen;
         VtcInfo m_vtc;
         std::vector<EvenementInfo> m_vtcEvenementen;
-        std::vector<EvenementInfo> m_aangemeldVtc;     // je VTC
+        std::vector<EvenementInfo> m_aangemeldVtc;  // your VTC
         std::atomic<std::uint64_t> m_eigenAccount{ 0 };
         std::vector<VtcNieuwsInfo> m_vtcNieuws;
-        // Wat we per speler weten, en wat er nog opgezocht moet worden.
-        // De cache blijft ook staan als een speler uit beeld verdwijnt: kom
-        // je hem later weer tegen, dan hoef je niets opnieuw te vragen.
-        // Wat we per speler uit één opvraging halen.
+        // What we know per player, and what still needs looking up. The
+        // cache also stays when a player leaves view: meet him again later
+        // and nothing needs asking again.
+        // What we get per player from one lookup.
         struct SpelerGegevens
         {
             int vtcId = 0;
@@ -198,16 +198,16 @@ namespace Ritten
         std::map<std::uint64_t, SpelerGegevens> m_spelerVtc;
         std::deque<std::uint64_t> m_wachtrij;
 
-        // Wie er op DIT MOMENT wordt opgezocht. Zonder dit zit zo iemand
-        // even in niemandsland -- niet meer in de rij, nog niet in de cache
-        // -- en meldt de overlay hem gewoon opnieuw aan. Gemeten 30-08:
-        // elke geslaagde opzoeking stond twee keer in het logboek.
+        // Who is being looked up RIGHT NOW. Without this such a player is
+        // briefly in no-man's land -- no longer queued, not yet cached -- and
+        // the overlay simply enqueues him again. Measured 30-08: every
+        // successful lookup appeared twice in the log.
         std::set<std::uint64_t> m_bezig;
 
-        // Terugschakelen na een mislukking. De API heeft een limiet die
-        // nergens gedocumenteerd staat; op vijf per seconde mislukte 68%
-        // van de verzoeken (gemeten 30-08). Loopt het mis, dan even
-        // helemaal stoppen in plaats van harder duwen.
+        // Back off after a failure. The API has a limit that is documented
+        // nowhere; at five per second 68% of requests failed (measured
+        // 30-08). If it goes wrong, stop completely for a while instead of
+        // pushing harder.
         int m_rustSeconden = 0;
         bool m_cacheGewijzigd = false;
 

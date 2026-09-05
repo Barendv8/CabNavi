@@ -121,7 +121,12 @@ namespace Ritten
         std::string beschrijving;
         if( isBus )
         {
-            beschrijving = std::to_string( trip.haltes.size() ) + " haltes";
+            // For a trip cancelled right away OnJobDataReady never fired; then
+            // the stop list is empty and "0 stops" says nothing. Better nothing
+            // than a zero.
+            beschrijving = trip.haltes.empty()
+                ? std::string()
+                : std::to_string( trip.haltes.size() ) + " haltes";
         }
         else
         {
@@ -129,15 +134,21 @@ namespace Ritten
                           + ( trip.bestemmingStad.empty() ? "?" : trip.bestemmingStad );
         }
 
-        const std::int64_t opbrengst = trip.inkomen != 0 ? trip.inkomen : trip.geschatUitbetaling;
-        const int kleur = geannuleerd ? 0xE2554A : ( isBus ? 0x3FB08A : 0xF2A33D ); // rood / groen / amber
+        // For a CANCELLED trip never report the estimated payout: that is
+        // money you did not receive, and then an amount appears under
+        // "cancelled" as if you were paid. Only for a completed trip may the
+        // estimate step in when the game did not pass the actual amount.
+        const std::int64_t opbrengst = geannuleerd
+            ? trip.inkomen
+            : ( trip.inkomen != 0 ? trip.inkomen : trip.geschatUitbetaling );
+        const int kleur = geannuleerd ? 0xE2554A : ( isBus ? 0x3FB08A : 0xF2A33D );  // red / green / amber
 
         json embed;
         embed[ "title" ] = titel;
         embed[ "description" ] = beschrijving;
         embed[ "color" ] = kleur;
 
-        // Hulpjes om het opbouwen leesbaar te houden.
+        // Little helpers to keep the assembly readable.
         auto veld = [ &]( json &lijst, const std::string &naam, const std::string &waarde, bool inLijn = true )
         {
             if( waarde.empty() ) return;
@@ -145,7 +156,7 @@ namespace Ritten
         };
         auto geld = []( std::int64_t bedrag ) -> std::string
         {
-            // Duizendtalscheiding met punten, zoals in het spel zelf.
+            // Thousands separated with dots, like in the game itself.
             std::string cijfers = std::to_string( bedrag < 0 ? -bedrag : bedrag );
             std::string uit;
             int teller = 0;
@@ -166,7 +177,7 @@ namespace Ritten
 
         json velden = json::array();
 
-        // --- Route en lading ---
+        // --- Route and cargo ---
         if( !isBus )
         {
             std::string van = trip.bronStad.empty() ? "?" : trip.bronStad;
@@ -184,7 +195,7 @@ namespace Ritten
             veld( velden, "Lading", ladingTekst );
         }
 
-        // --- Afstand en tijd ---
+        // --- Distance and time ---
         std::string afstand = std::to_string( (int)trip.afgelegdeAfstandKm ) + " km";
         if( trip.geplandeAfstandKm > 0.0 )
         {
@@ -199,16 +210,16 @@ namespace Ritten
                   std::to_string( minuten / 60 ) + "u " + std::to_string( minuten % 60 ) + "m" );
         }
 
-        // --- Voertuig ---
+        // --- Vehicle ---
         std::string truck = trip.voertuigMerk;
         if( !trip.voertuigModel.empty() )
         {
             if( !truck.empty() ) truck += " ";
             truck += trip.voertuigModel;
         }
-        veld( velden, "Truck", truck );
+        veld( velden, isBus ? "Bus" : "Truck", truck );
 
-        // --- Brandstof ---
+        // --- Fuel ---
         if( trip.brandstofVerbruikLiters > 0.0 )
         {
             std::string brandstof = komma( trip.brandstofVerbruikLiters, 1, " l" );
@@ -224,24 +235,28 @@ namespace Ritten
             veld( velden, "Brandstofkosten", komma( trip.brandstofKostenEuro, 2, "" ).insert( 0, "EUR " ) );
         }
 
-        // --- Schade ---
-        if( trip.ladingSchadePercentage > 0.0 || trip.aanhangerSchadePercentage > 0.0 )
+        // --- Damage ---
+        // Chassis belongs here too: that is the figure that counts in a
+        // collision, and it was missing.
+        if( trip.schadeChassisPercentage > 0.0 || trip.ladingSchadePercentage > 0.0
+            || trip.aanhangerSchadePercentage > 0.0 )
         {
             veld( velden, "Schade",
-                  "lading " + komma( trip.ladingSchadePercentage, 0, "%" ) +
+                  "chassis " + komma( trip.schadeChassisPercentage, 0, "%" ) +
+                  " | lading " + komma( trip.ladingSchadePercentage, 0, "%" ) +
                   " | trailer " + komma( trip.aanhangerSchadePercentage, 0, "%" ) );
         }
 
-        // --- Onkosten: het stuk dat TrucksBook-achtige rapportjes missen ---
+        // --- Expenses: the part TrucksBook-style reports miss ---
         if( trip.tolKosten > 0 )      veld( velden, "Tol", geld( trip.tolKosten ) );
         if( trip.veerbootKosten > 0 ) veld( velden, "Veerboot", geld( trip.veerbootKosten ) );
         if( trip.treinKosten > 0 )    veld( velden, "Trein", geld( trip.treinKosten ) );
 
         if( !trip.boetes.empty() )
         {
-            // Elke boete apart benoemen: "waarvoor" is nuttiger dan alleen
-            // een totaalbedrag. Discord kapt een veld af boven 1024 tekens,
-            // dus we stoppen netjes als het te lang wordt.
+            // Name each fine separately: "for what" is more useful than just a
+            // total. Discord truncates a field above 1024 characters, so we stop
+            // neatly when it gets too long.
             std::string regels;
             int getoond = 0;
             for( const Boete &b : trip.boetes )
@@ -258,7 +273,7 @@ namespace Ritten
             veld( velden, "Boetes (" + geld( trip.boeteKosten ) + ")", regels, false );
         }
 
-        // --- Financieel overzicht ---
+        // --- Financial summary ---
         const std::int64_t onkosten = trip.tolKosten + trip.veerbootKosten
                                        + trip.treinKosten + trip.boeteKosten;
         const std::int64_t netto = opbrengst - onkosten
@@ -270,17 +285,40 @@ namespace Ritten
             veld( velden, "Netto", geld( netto ) );
         }
 
-        // --- Bus: haltes ---
+        // --- Bus: stops and passengers ---
         if( isBus && !trip.haltes.empty() )
         {
             std::string route;
+            int totaalIn = 0;
             for( std::size_t i = 0; i < trip.haltes.size(); ++i )
             {
+                totaalIn += trip.haltes[ i ].instappers;
+
                 if( route.size() > 900 ) { route += " ..."; break; }
                 if( i > 0 ) route += " -> ";
                 route += trip.haltes[ i ].naam;
+
+                // Boarding and alighting behind it, only when something happens.
+                // At the final stop nobody boards, so there is only a minus -- that
+                // reads naturally.
+                const int in = trip.haltes[ i ].instappers;
+                const int uit = trip.haltes[ i ].uitstappers;
+                if( in > 0 && uit > 0 )
+                    route += " (+" + std::to_string( in ) + " -" + std::to_string( uit ) + ")";
+                else if( in > 0 )
+                    route += " (+" + std::to_string( in ) + ")";
+                else if( uit > 0 )
+                    route += " (-" + std::to_string( uit ) + ")";
             }
             veld( velden, "Route", route, false );
+
+            // How many people you carried this trip: the sum of all boarders.
+            // trip.passagiers is the number ON BOARD, and at the end of the trip
+            // that is zero -- not what you want to report here.
+            if( totaalIn > 0 )
+            {
+                veld( velden, "Passagiers", std::to_string( totaalIn ) );
+            }
         }
 
         if( geannuleerd && !trip.annuleringsReden.empty() )
@@ -360,9 +398,9 @@ namespace Ritten
         }
     }
 
-    // TIJDELIJK, zelfde patroon als bij TruckTracking: schrijft naar
-    // debug.log als het versturen mislukt, zodat je niet blind hoeft te
-    // gokken als de Discord-melding een keer niet aankomt.
+    // TEMPORARY, same pattern as in TruckTracking: writes to debug.log
+    // when sending fails, so you do not have to guess blindly when a
+    // Discord message does not arrive.
     static void SchrijfDebugRegel( const std::string &regel )
     {
         std::filesystem::path pad;
@@ -397,8 +435,17 @@ namespace Ritten
 
         if( !WinHttpCrackUrl( wideUrl.c_str(), static_cast<DWORD>( wideUrl.size() ), 0, &comp ) )
         {
-            SchrijfDebugRegel( "Ongeldige webhook-URL, kon 'm niet ontleden: " + url );
-            return; // ongeldige URL, niets aan te doen -- gebruiker moet 'm checken
+            // NEVER log the URL itself: it contains the secret token, and
+            // whoever has it can post in the Discord channel. Someone who makes a
+            // typo and then pastes his debug.log on the forum would otherwise
+            // give away his webhook. Length and whether it starts correctly is
+            // enough to see what is wrong.
+            const bool juistBegin = url.rfind( "https://discord.com/api/webhooks/", 0 ) == 0
+                                 || url.rfind( "https://discordapp.com/api/webhooks/", 0 ) == 0;
+            SchrijfDebugRegel( "Invalid webhook URL (length " + std::to_string( url.size() )
+                               + ", starts " + ( juistBegin ? "correctly" : "incorrectly" )
+                               + " with https://discord.com/api/webhooks/)" );
+            return;  // invalid URL, nothing to do -- user must check it
         }
 
         const bool https = comp.nScheme == INTERNET_SCHEME_HTTPS;
@@ -407,14 +454,14 @@ namespace Ritten
                                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0 );
         if( !sessie )
         {
-            SchrijfDebugRegel( "WinHttpOpen mislukt (foutcode " + std::to_string( GetLastError() ) + ")" );
+            SchrijfDebugRegel( "WinHttpOpen failed (error code " + std::to_string( GetLastError() ) + ")" );
             return;
         }
 
         HINTERNET verbinding = WinHttpConnect( sessie, hostNaam, comp.nPort, 0 );
         if( !verbinding )
         {
-            SchrijfDebugRegel( "WinHttpConnect mislukt (foutcode " + std::to_string( GetLastError() ) + ")" );
+            SchrijfDebugRegel( "WinHttpConnect failed (error code " + std::to_string( GetLastError() ) + ")" );
             WinHttpCloseHandle( sessie );
             return;
         }
@@ -424,7 +471,7 @@ namespace Ritten
             https ? WINHTTP_FLAG_SECURE : 0 );
         if( !request )
         {
-            SchrijfDebugRegel( "WinHttpOpenRequest mislukt (foutcode " + std::to_string( GetLastError() ) + ")" );
+            SchrijfDebugRegel( "WinHttpOpenRequest failed (error code " + std::to_string( GetLastError() ) + ")" );
             WinHttpCloseHandle( verbinding );
             WinHttpCloseHandle( sessie );
             return;
@@ -438,11 +485,11 @@ namespace Ritten
 
         if( !verzonden )
         {
-            SchrijfDebugRegel( "WinHttpSendRequest mislukt (foutcode " + std::to_string( GetLastError() ) + ")" );
+            SchrijfDebugRegel( "WinHttpSendRequest failed (error code " + std::to_string( GetLastError() ) + ")" );
         }
         else if( !WinHttpReceiveResponse( request, nullptr ) )
         {
-            SchrijfDebugRegel( "WinHttpReceiveResponse mislukt (foutcode " + std::to_string( GetLastError() ) + ")" );
+            SchrijfDebugRegel( "WinHttpReceiveResponse failed (error code " + std::to_string( GetLastError() ) + ")" );
         }
         else
         {
@@ -451,8 +498,8 @@ namespace Ritten
                                   WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX );
             if( statusCode < 200 || statusCode >= 300 )
             {
-                SchrijfDebugRegel( "Discord antwoordde met statuscode " + std::to_string( statusCode )
-                                    + " -- check of de webhook-URL klopt en nog bestaat." );
+                SchrijfDebugRegel( "Discord answered with status code " + std::to_string( statusCode )
+                                    + " -- check that the webhook URL is correct and still exists." );
             }
         }
 

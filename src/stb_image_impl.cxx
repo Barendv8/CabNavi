@@ -1,7 +1,7 @@
 // stb_image_impl.cxx
 //
-// stb_image.h is een "header-only" library, maar heeft in PRECIES EEN
-// bronbestand deze define nodig om de daadwerkelijke functiecode te
-// genereren. Dit bestand doet niets anders dan dat.
+// stb_image.h is a "header-only" library, but needs this define in EXACTLY
+// ONE source file to generate the actual function code. This file does
+// nothing else.
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>

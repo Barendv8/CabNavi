@@ -1,10 +1,10 @@
 #pragma once
 // TripTypes.hxx
 //
-// Een "Trip" is onze eigen, uniforme voorstelling van een rit -- of hij nu
-// van de TruckersMP BusModule komt (buslijnen) of uit de SCS telemetry job-
-// kanalen (regulier vrachtvervoer). Alles wat de overlay laat zien en wat
-// TripLogger wegschrijft naar trips.jsonl is gebaseerd op deze struct.
+// A "Trip" is our own uniform representation of a job -- whether it comes
+// from the TruckersMP BusModule (bus lines) or from the SCS telemetry job
+// channels (regular cargo). Everything the overlay shows and everything
+// TripLogger writes to trips.jsonl is based on this struct.
 
 #include <cstdint>
 #include <string>
@@ -14,8 +14,8 @@ namespace Ritten
 {
     enum class TripType
     {
-        Vracht, // reguliere ETS2/ATS vrachtjob (SCS telemetry)
-        Bus     // TruckersMP buslijn-job (BusModule)
+        Vracht,  // regular ETS2/ATS cargo job (SCS telemetry)
+        Bus  // TruckersMP bus line job (BusModule)
     };
 
     enum class TripStatus
@@ -27,31 +27,36 @@ namespace Ritten
 
     struct StopInfo
     {
-        std::string naam;             // weergavenaam (bv. "Parijs") -- voor tonen in de overlay
-        std::string cityIdentifier;   // interne stad-code (bv. "paris") -- voor het matchen van OnStopCompleted
+        std::string naam;  // display name (e.g. "Parijs") -- for showing in the overlay
+        std::string cityIdentifier;  // internal city code (e.g. "paris") -- for matching OnStopCompleted
         bool voltooid = false;
         double afgelegdeAfstandKm = 0.0;
-        double geplandeAfstandKm = 0.0; // vanaf ritstart tot deze halte, voor de resterende-tijd-schatting
+        double geplandeAfstandKm = 0.0;  // from trip start to this stop, for the remaining-time estimate
 
-        // Geplande rijtijd in ECONOMY-minuten (speltijd), cumulatief vanaf
-        // ritstart tot deze halte. De SDK geeft per halte de tijd vanaf de
-        // VORIGE halte (net als de afstand), dus we tellen die zelf op.
-        // Blijft 0 tot OnJobDataReady is gevuurd -- het spel rekent de
-        // navigatiegegevens pas na de jobstart uit.
+        // Who boards and alights at THIS stop. Comes straight from the SDK
+        // at OnJobDataReady; nothing to compute ourselves.
+        int instappers = 0;
+        int uitstappers = 0;
+
+        // Planned driving time in ECONOMY minutes (game time), cumulative
+        // from trip start to this stop. The SDK gives per stop the time from
+        // the PREVIOUS stop (like the distance), so we add it up ourselves.
+        // Stays 0 until OnJobDataReady has fired -- the game only computes
+        // the navigation data after the job starts.
         double geplandeTijdMin = 0.0;
     };
 
-    // Eén boete zoals het spel hem meldt via het "player.fined"-
-    // gameplay-event. `reden` is de ruwe offence-code van het spel
-    // (bv. "speeding", "red_signal"); Overlay vertaalt die naar Nederlands.
+    // One fine as the game reports it via the "player.fined" gameplay
+    // event. `reden` is the game's raw offence code (e.g. "speeding",
+    // "red_signal"); Overlay translates it to Dutch.
     struct Boete
     {
         std::string reden;
         std::int64_t bedrag = 0;
     };
 
-    // Eén betaalde doorgang: tolpoort, veerboot of trein. Het spel meldt
-    // deze alle drie via aparte gameplay-events, maar met dezelfde vorm.
+    // One paid passage: toll gate, ferry or train. The game reports all
+    // three via separate gameplay events, but in the same shape.
     enum class DoorgangType
     {
         Tol,
@@ -63,8 +68,8 @@ namespace Ritten
     {
         DoorgangType type = DoorgangType::Tol;
         std::int64_t bedrag = 0;
-        std::string vanaf;  // alleen gevuld bij veerboot/trein
-        std::string naar;   // idem
+        std::string vanaf;  // only filled for ferry/train
+        std::string naar;  // same
     };
 
     struct Trip
@@ -72,19 +77,19 @@ namespace Ritten
         TripType type = TripType::Vracht;
         TripStatus status = TripStatus::Bezig;
 
-        std::string id; // uniek id (tijdstempel + type), gebruikt in trips.jsonl
+        std::string id;  // unique id (timestamp + type), used in trips.jsonl
 
-        // Algemeen
+        // General
         std::string startTijdIso;
         std::string eindTijdIso;
-        std::uint32_t economyStartTijd = 0; // in-game economy-minuten
+        std::uint32_t economyStartTijd = 0;  // in-game economy minutes
         std::uint32_t economyEindTijd = 0;
 
         std::string serverNaam;
         std::string voertuigMerk;
         std::string voertuigModel;
 
-        // Vracht-specifiek
+        // Cargo-specific
         std::string lading;
         std::string bronStad;
         std::string bestemmingStad;
@@ -95,37 +100,41 @@ namespace Ritten
         std::int64_t inkomen = 0;
         bool opTijd = true;
 
-        // Geschatte brandstofkosten van deze rit (zie FuelCosts.hxx: gebaseerd
-        // op gemeten verbruik x zelf-ingestelde prijs per liter, niet op een
-        // exacte in-game prijs die de telemetrie niet blootlegt).
+        // Estimated fuel cost of this trip (see FuelCosts.hxx: based on
+        // measured consumption x self-set price per litre, not on an exact
+        // in-game price the telemetry does not expose).
         double brandstofVerbruikLiters = 0.0;
         double brandstofKostenEuro = 0.0;
 
-        // Onkosten die het spel zelf meldt als gameplay-event tijdens de rit
-        // (dit zijn ECHTE in-game bedragen, geen schatting zoals bij
-        // brandstof -- daar moeten we zelf een prijs per liter voor
-        // invullen omdat de telemetrie die niet blootlegt).
+        // Expenses the game itself reports as gameplay events during the
+        // trip (these are REAL in-game amounts, not an estimate like fuel --
+        // for fuel we must fill in a price per litre ourselves because the
+        // telemetry does not expose it).
         std::vector<Boete> boetes;
         std::vector<Doorgang> doorgangen;
-        std::int64_t tolKosten = 0;       // som van alle tolpoorten deze rit
-        std::int64_t veerbootKosten = 0;  // som van alle veerboten deze rit
-        std::int64_t treinKosten = 0;     // som van alle treinen deze rit
-        std::int64_t boeteKosten = 0;     // som van alle boetes deze rit
+        std::int64_t tolKosten = 0;  // sum of all toll gates this trip
+        std::int64_t veerbootKosten = 0;  // sum of all ferries this trip
+        std::int64_t treinKosten = 0;  // sum of all trains this trip
+        std::int64_t boeteKosten = 0;  // sum of all fines this trip
 
-        // Aanhanger: schade aan het chassis en aan de lading zelf. Deze
-        // twee zijn niet hetzelfde -- je kan een gedeukte trailer hebben
-        // met perfecte lading, en andersom. Alleen de ladingschade telt
-        // mee voor je uitbetaling.
+        // Trailer: damage to the chassis and to the cargo itself. These two
+        // are not the same -- you can have a dented trailer with perfect
+        // cargo, and the other way round. Only cargo damage counts towards
+        // your payout.
         double aanhangerSchadePercentage = 0.0;
         double ladingSchadePercentage = 0.0;
         double ladingGewichtKg = 0.0;
 
-        // Bus-specifiek
+        // Bus-specific
         std::vector<StopInfo> haltes;
         std::int64_t geschatUitbetaling = 0;
+
+        // Number of passengers for this bus line. Comes from the SDK at
+        // trip start.
+        std::uint32_t passagiers = 0;
         std::string annuleringsReden;
 
-        // Live/actuele meting (alleen relevant terwijl status == Bezig)
+        // Live/current reading (only relevant while status == Bezig)
         double huidigeSnelheidKmh = 0.0;
         double brandstofPercentage = 0.0;
         double schadeChassisPercentage = 0.0;

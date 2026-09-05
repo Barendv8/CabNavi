@@ -3,6 +3,7 @@
 #include "CallbackHulp.hxx"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace Ritten
@@ -15,8 +16,8 @@ namespace Ritten
     PlayersNearby::PlayersNearby( TruckersMP::Session &session )
         : m_session( session )
     {
-        // Snapshot bij opstarten/herladen (zie Player-moduledocs: bedoeld
-        // als eenmalige seed, niet om elke frame aan te roepen).
+        // Snapshot at startup/reload (see Player module docs: meant as a
+        // one-time seed, not to be called every frame).
         for( const TruckersMP::Player &speler : m_session.Player().GetAllPlayers().value_or( std::vector<TruckersMP::Player>{} ) )
         {
             VerversRecord( speler );
@@ -35,9 +36,9 @@ namespace Ritten
             }
         } ) );
 
-        // OnUpdate vuurt op netwerksnelheid -- puur databeheer, geen SDK-
-        // aanroepen terug en geen logica hier (zie de docs: "Treat the
-        // handler as a data tap").
+        // OnUpdate fires at network rate -- pure data management, no SDK
+        // calls back and no logic here (see the docs: "Treat the handler as
+        // a data tap").
         m_session.Player().OnUpdate.Register( Beschermd( "OnUpdate", [ this ]( TruckersMP::PlayerUpdateEvent &e )
         {
             const TruckersMP::Player &speler = e.GetPlayer();
@@ -48,6 +49,7 @@ namespace Ritten
                 {
                     it->second.afstandMeter = speler.GetDistanceFromLocalPlayer().value_or( it->second.afstandMeter );
                     it->second.pingMs = speler.GetNetworkLatency().value_or( it->second.pingMs );
+                    it->second.laatsteUpdate = std::chrono::steady_clock::now();
                 }
             }
         } ) );
@@ -65,8 +67,8 @@ namespace Ritten
         r.gebruikersnaam = speler.GetUsername().value_or( "Onbekend" );
         r.tagTekst = speler.GetTagText().value_or( "" );
 
-        // NB: deze getters komen in jouw SDK-versie terug als std::optional<Bool>
-        // (niet als kale Bool, zoals de moduledocs suggereren) -- vandaar .value_or(false).
+        // NB: in your SDK version these getters return std::optional<Bool>
+        // (not a bare Bool, as the module docs suggest) -- hence .value_or(false).
         r.isPatron = speler.IsPatron().value_or( false );
         r.isModerator = speler.IsGameModerator().value_or( false );
         r.isTeam = speler.IsTeamMember().value_or( false );
@@ -75,19 +77,23 @@ namespace Ritten
         r.afstandMeter = speler.GetDistanceFromLocalPlayer().value_or( 0.f );
         r.pingMs = speler.GetNetworkLatency().value_or( 0 );
 
-        // Positie, koers en aanhangerstatus. Dit doet SDK-aanroepen en hoort
-        // daarom hier (stream-in / seed) thuis, NIET in OnUpdate -- die vuurt
-        // op netwerksnelheid en moet volgens de docs een pure datatap blijven.
+        // Position, heading and trailer status. This makes SDK calls and so
+        // belongs here (stream-in / seed), NOT in OnUpdate -- that fires at
+        // network rate and per the docs must remain a pure data tap.
         VerversPositie( speler, r );
+        // On stream-in the player is alive by definition: mark as updated
+        // right away, otherwise he is invisible for a fraction until the
+        // first OnUpdate.
+        r.laatsteUpdate = std::chrono::steady_clock::now();
 
         m_spelers[ *id ] = std::move( r );
     }
 
     namespace
     {
-        // Yaw (kompaskoers) uit een quaternion, in graden 0..360.
-        // Standaardformule voor rotatie om de verticale as; we gebruiken
-        // alleen yaw omdat een radar plat is -- pitch en roll doen niet mee.
+        // Yaw (compass heading) from a quaternion, in degrees 0..360.
+        // Standard formula for rotation about the vertical axis; we only use
+        // yaw because a radar is flat -- pitch and roll do not matter.
         double YawGraden( const TruckersMP::Quaternion &q )
         {
             const double siny = 2.0 * ( (double)q.w * (double)q.y + (double)q.x * (double)q.z );
@@ -97,7 +103,7 @@ namespace Ritten
             return graden;
         }
 
-        // Zet een hoek terug in het bereik 0..360.
+        // Wrap an angle back into the range 0..360.
         double NormaliseerGraden( double g )
         {
             while( g < 0.0 ) g += 360.0;
@@ -110,13 +116,12 @@ namespace Ritten
     {
         r.positieBekend = false;
 
-        // NOOIT een leeg handle construeren en daar methodes op aanroepen.
+        // NEVER construct an empty handle and call methods on it.
         //
-        // Hier stond `.value_or( TruckersMP::Vehicle{} )`. Dat ziet er
-        // onschuldig uit, maar zo'n standaard-geconstrueerd handle heeft geen
-        // geldige moduleverwijzing; er een getter op aanroepen leest een
-        // ongeldige pointer en klapt de plugin eruit. Elke optional wordt nu
-        // eerst gecontroleerd voordat we hem gebruiken.
+        // This used to be `.value_or( TruckersMP::Vehicle{} )`. Looks
+        // harmless, but such a default-constructed handle has no valid module
+        // reference; calling a getter on it reads an invalid pointer and
+        // crashes the plugin. Every optional is now checked before use.
         r.heeftAanhanger = false;
 
         r.aanhangerLengteM = -1.0f;
@@ -124,10 +129,9 @@ namespace Ritten
         {
             r.heeftAanhanger = aanhanger->Exists().value_or( false );
 
-            // Lengte uit de bounding box. Die is in voertuigruimte, dus de
-            // langste van de drie assen IS de lengte -- welke as dat is
-            // hangt af van hun assenstelsel, en dat hoeven we zo niet te
-            // weten.
+            // Length from the bounding box. It is in vehicle space, so the
+            // longest of the three axes IS the length -- which axis that is
+            // depends on their coordinate system, and we do not need to know.
             if( r.heeftAanhanger )
             {
                 if( const auto doos = aanhanger->GetBoundingBox() )
@@ -152,45 +156,82 @@ namespace Ritten
         const std::optional<TruckersMP::Placement> mij = mijnVoertuig->GetPlacement();
         const std::optional<TruckersMP::Placement> hem = zijnVoertuig->GetPlacement();
 
-        if( !mij || !hem ) return; // geen voertuig in de wereld -> niets te tonen
+        if( !mij || !hem ) return;  // no vehicle in the world -> nothing to show
 
-        // Verschilvector in het horizontale vlak. Y is hoogte en telt niet
-        // mee: een truck op een viaduct boven je is op de radar gewoon
-        // "voor je", niet verder weg.
+        // Difference vector in the horizontal plane. Y is height and does
+        // not count: a truck on a viaduct above you is simply "ahead" on the
+        // radar, not further away.
         const double dx = hem->position.x - mij->position.x;
         const double dz = hem->position.z - mij->position.z;
-        if( dx == 0.0 && dz == 0.0 ) return; // exact op elkaar; hoek zinloos
+        if( dx == 0.0 && dz == 0.0 ) return;  // exactly on top of each other; angle meaningless
 
-        // Absolute richting naar die speler, in hetzelfde stelsel als de yaw.
+        // Absolute direction to that player, in the same frame as the yaw.
         double richtingNaarHem = std::atan2( dx, dz ) * 180.0 / 3.14159265358979323846;
 
         const double mijnKoers = YawGraden( mij->rotation );
         const double zijnKoers = YawGraden( hem->rotation );
 
-        // Peiling relatief aan waar JIJ naar kijkt: 0 = recht vooruit.
+        // Bearing relative to where YOU are looking: 0 = straight ahead.
         r.peilingGraden = static_cast<float>( NormaliseerGraden( richtingNaarHem - mijnKoers ) );
-        // Koersverschil: rond 0 = zelfde kant op, rond 180 = tegenligger.
+        // Heading difference: around 0 = same direction, around 180 = oncoming.
         r.koersVerschilGraden = static_cast<float>( NormaliseerGraden( zijnKoers - mijnKoers ) );
         r.positieBekend = true;
     }
 
     void PlayersNearby::VerversPosities()
     {
-        // Handles worden per keer opnieuw opgehaald via het speler-ID; we
-        // bewaren ze nooit (zie "Do not store handles" in de docs). Een
-        // speler die net weg is, geeft gewoon niets terug en houdt dan zijn
-        // laatst bekende record met positieBekend = false.
+        // BRAKE. This loop makes a handful of SDK calls per player, and the
+        // caller hangs on the frame event -- sixty times a second times fifty
+        // players is needlessly much. Four times a second is plenty for a
+        // radar and for the incident recorder, which itself only keeps a
+        // snapshot once per second.
+        const auto nu = std::chrono::steady_clock::now();
+        if( std::chrono::duration<double>( nu - m_laatsteVerversing ).count() < 0.25 )
+        {
+            return;
+        }
+        m_laatsteVerversing = nu;
+
+        // Own position first, independent of whether anyone else is nearby.
+        // Same SDK path as the radar; nothing new is asked of the game.
+        m_eigenBekend = false;
+        if( const auto lokaal = m_session.Player().GetLocalPlayer() )
+        {
+            if( const auto voertuig = lokaal->GetVehicle() )
+            {
+                if( const std::optional<TruckersMP::Placement> pl = voertuig->GetPlacement() )
+                {
+                    m_eigenX = pl->position.x; m_eigenZ = pl->position.z;
+                    m_eigenMoment = nu; m_eigenBekend = true;
+                }
+            }
+        }
+
+        // Handles are fetched fresh each time via the player ID; we never
+        // store them (see "Do not store handles" in the docs). A player who
+        // just left simply returns nothing and keeps his last known record
+        // with positieBekend = false.
         for( auto &[ id, record ] : m_spelers )
         {
+            // Only players TruckersMP itself has updated in the last two
+            // seconds. A player being torn down gets no more OnUpdate, but
+            // GetPlayerByID may still briefly return a handle whose getters read
+            // dead memory. See the crash of 03-09: TruckersMP calls us, we call
+            // the SDK, and it fails inside core_ets2mp.dll.
+            if( std::chrono::duration<double>( nu - record.laatsteUpdate ).count() > 2.0 )
+            {
+                record.positieBekend = false;
+                continue;
+            }
             const std::optional<TruckersMP::Player> speler = m_session.Player().GetPlayerByID( id );
             if( !speler )
             {
                 record.positieBekend = false;
                 continue;
             }
-            // Afstand en ping komen normaal via OnUpdate binnen, maar bij een
-            // net herladen plugin is dat nog niet gebeurd -- meenemen kost hier
-            // niets en voorkomt een frame met nullen.
+            // Distance and ping normally arrive via OnUpdate, but right after a
+            // plugin reload that has not happened yet -- taking them here costs
+            // nothing and avoids a frame of zeros.
             record.afstandMeter = speler->GetDistanceFromLocalPlayer().value_or( record.afstandMeter );
             VerversPositie( *speler, record );
         }
@@ -204,5 +245,13 @@ namespace Ritten
         std::sort( lijst.begin(), lijst.end(),
                    []( const SpelerRecord &a, const SpelerRecord &b ) { return a.afstandMeter < b.afstandMeter; } );
         return lijst;
+    }
+
+    bool PlayersNearby::EigenPositie( double &x, double &z ) const
+    {
+        if( !m_eigenBekend ) return false;
+        if( std::chrono::duration<double>( std::chrono::steady_clock::now() - m_eigenMoment ).count() > 2.0 ) return false;
+        x = m_eigenX; z = m_eigenZ;
+        return true;
     }
 }

@@ -205,6 +205,8 @@ namespace ImGui
 
     void SameLine( float = 0.0f, float = -1.0f );
     void Spacing();
+    void Indent( float breedte = 0.0f );
+    void Unindent( float breedte = 0.0f );
     void Separator();
     void NewLine();
     void Dummy( const ImVec2 & );

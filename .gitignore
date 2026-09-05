@@ -1,0 +1,56 @@
+# --- Build output ----------------------------------------------------------
+build/
+out/
+cmake-build-*/
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+
+# --- Visual Studio / IDE ---------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+CMakeSettings.json
+CMakeUserPresets.json
+
+# --- CMake -----------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+_deps/
+
+# --- SDKs (their own licences, never redistribute) -------------------------
+GameClientSDK/
+scs_sdk*/
+sdk/
+
+# --- Personal data ---------------------------------------------------------
+# Everything the plugin writes lives in %APPDATA%\CabNavi and must never end
+# up here. instellingen.json holds your Discord webhook, which is a secret:
+# anyone who has it can post in your channel. trips.jsonl is your own driving
+# history.
+*.log
+debug.log
+trips.jsonl
+instellingen.json
+uiterlijk.json
+tachograaf.json
+vtc.json
+spelers_vtc.json
+brandstofprijzen.json
+incident_instellingen.json
+imgui.ini
+
+# --- Your own branding -----------------------------------------------------
+# The default logo ships with the project; a personal one does not.
+weeda-logo.png
+
+# --- OS --------------------------------------------------------------------
+Thumbs.db
+Desktop.ini
+.DS_Store

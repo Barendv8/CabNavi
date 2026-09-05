@@ -1,11 +1,11 @@
 #pragma once
 // Overlay.hxx
 //
-// Tekent een modern ImGui-venster bovenop het spel: een tabblad "Live" met
-// de actieve rit (bus of vracht), een tabblad "Geschiedenis" met de laatste
-// ritten en een tabblad "Statistieken" met totalen. Wordt geïnitialiseerd
-// met de DirectX11-device van de Render-module en getekend in OnPostRender
-// (zie de Render-moduledocs: "most overlays want" OnPostRender).
+// Draws a modern ImGui window on top of the game: a "Live" tab with the
+// active trip (bus or cargo), a "History" tab with the latest trips and a
+// "Statistics" tab with totals. Initialised with the DirectX11 device of
+// the Render module and drawn in OnPostRender (see the Render module docs:
+// "most overlays want" OnPostRender).
 
 #include "BusTracking.hxx"
 #include "DiscordWebhook.hxx"
@@ -25,10 +25,10 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ImFont;
-// ImVec4 wordt hieronder als retour-/parametertype gebruikt (KaartKleur,
-// TintKaartKleur). Alleen aankondigen, niet imgui.h includen: die header
-// hoort niet in onze publieke interface thuis, en de .cxx die deze functies
-// implementeert haalt imgui.h zelf al binnen.
+// ImVec4 is used below as return/parameter type (KaartKleur,
+// TintKaartKleur). Only forward-declare, do not include imgui.h: that
+// header does not belong in our public interface, and the .cxx that
+// implements these functions already pulls in imgui.h itself.
 struct ImVec4;
 struct IDXGISwapChain;
 
@@ -42,21 +42,21 @@ namespace Ritten
                  IncidentRecorder &incident );
         ~Overlay();
 
-        // Aanroepen zodra Render().GetRendererID() == DirectX11 is en er een
-        // device-handle beschikbaar is.
+        // Call as soon as Render().GetRendererID() == DirectX11 and a device
+        // handle is available.
         bool InitDirectX11( ID3D11Device *device, void *vensterHandle );
         void Shutdown();
 
-        // In Render().OnPostRender geregistreerd.
+        // Registered in Render().OnPostRender.
         void Teken();
 
-        // Voer input van de TruckersMP Input-module door naar ImGui. Zonder
-        // dit teken je wel een overlay, maar reageert hij nergens op: de SDK
-        // heeft geen "vensterhaak" zoals Dear ImGui's Win32-backend normaal
-        // gebruikt, dus muis/toetsenbord moeten we zelf doorgeven.
-        // Retourneert of de overlay de input "opeist" -- zo ja, moet de
-        // aanroeper het bijbehorende event blokkeren voor het spel zelf
-        // (zie InputMouseButtonEvent::SetBlock in de SDK-docs).
+        // Forward input from the TruckersMP Input module to ImGui. Without
+        // this you draw an overlay, but it reacts to nothing: the SDK has no
+        // "window hook" like Dear ImGui's Win32 backend normally uses, so
+        // mouse/keyboard must be passed on by us.
+        // Returns whether the overlay "claims" the input -- if so, the caller
+        // must block the corresponding event for the game itself (see
+        // InputMouseButtonEvent::SetBlock in the SDK docs).
         void OpMuisBeweging( int x, int y );
         void OpMuisKnop( int knop, bool ingedrukt );
         void OpMuisWiel( float delta );
@@ -65,7 +65,7 @@ namespace Ritten
         bool WilMuis() const;
         bool WilToetsenbord() const;
 
-        // Toggle-toets (bv. Insert) via de Input-module.
+        // Toggle key (e.g. Insert) via the Input module.
         void SchakelZichtbaarheid() { m_zichtbaar = !m_zichtbaar; }
         bool IsZichtbaar() const { return m_zichtbaar; }
 
@@ -73,10 +73,10 @@ namespace Ritten
         void TekenLiveTab();
         void TekenBoordcomputerTab();
 
-        // Smalle tachograafstrip voor de Live-tab: alleen kopje, balk en tijd
-        // op EEN regel. De volledige tachograafkaart staat op het
-        // boordcomputer-tabblad; deze strip is er zodat je tijdens het rijden
-        // niet van tabblad hoeft te wisselen om je rijtijd te zien.
+        // Narrow tachograph strip for the Live tab: only header, bar and
+        // time on ONE line. The full tachograph card is on the board
+        // computer tab; this strip exists so you do not have to switch tabs
+        // while driving to see your driving time.
         void TekenTachoStrip();
         void TekenSpelersTab();
         void TekenGeschiedenisTab();
@@ -85,48 +85,54 @@ namespace Ritten
         void TekenVtcTab();
         void TekenVtcInstellingenTab();
 
-        // Instellingen-secties als kaartjes: opent een omkaderd vak met een
-        // gekleurd kopje. Sluiten met SectieEind().
+        // Settings sections as cards: opens a framed box with a coloured
+        // header. Close with SectieEind().
         //
-        // vasteHoogte (optioneel, standaard 0): 0 betekent precies zoals
-        // altijd -- het kaartje groeit automatisch mee met zijn inhoud.
-        // Groter dan 0 legt de hoogte vast; alleen UITERLIJK gebruikt dat.
+        // vasteHoogte (optional, default 0): 0 means exactly as always -- the
+        // card grows automatically with its content. Greater than 0 fixes
+        // the height; only UITERLIJK uses that.
         void SectieStart( const char *naam, ImVec4 kleur, float vasteHoogte = 0.0f );
 
-        // Hoogte van een sectie UITREKENEN in plaats van een pixelgetal
-        // intypen. Zie de waarschuwing bij KaartHoogte(): "een vast getal
-        // ging mis zodra het kop-font groter bleek dan gepland -- het
-        // onderschrift viel eronderuit en ImGui zette er een scrollbalkje
-        // in." Precies dat gebeurde hier ook.
+        // COMPUTE the height of a section instead of typing a pixel number.
+        // See the warning at KaartHoogte(): "a fixed number went wrong as
+        // soon as the header font turned out larger than planned -- the
+        // caption fell out and ImGui put a scrollbar in." Exactly that
+        // happened here too.
         //
-        // Je geeft op WAT erin staat; de maten komen van ImGui zelf, dus het
-        // schaalt mee met het lettertype:
-        //   tekstRegels = regels TekstGedimd / TextDisabled
-        //   velden      = keuzelijsten, invulvelden, schuiven, vinkjes, knoppen
-        //   spaties     = losse ImGui::Spacing()
+        // You specify WHAT is in it; the sizes come from ImGui itself, so it
+        // scales with the font:
+        //   tekstRegels = lines of TekstGedimd / TextDisabled
+        //   velden      = dropdowns, input fields, sliders, checkboxes, buttons
+        //   spaties     = separate ImGui::Spacing()
         float SectieHoogte( int tekstRegels, int velden, int spaties = 0 ) const;
         void SectieEind();
 
-        // Breedte voor een schuif of keuzemenu in de instellingen. Schaalt
-        // mee met het vak in plaats van een vast getal, zodat er rechts geen
-        // leegte overblijft -- maar met grenzen, want een schuif van 800
-        // pixels is ook nergens goed voor.
+        // Width for a slider or dropdown in the settings. Scales with the
+        // box instead of a fixed number, so no emptiness is left on the right
+        // -- but with limits, because an 800-pixel slider is no good either.
         float VeldBreedte() const;
         void TekenIncidentTab();
 
-        // Herbruikbaar: klein "..."-knopje dat een contextmenu opent met
-        // Steam-profiel/TruckersMP-profiel/ID-kopieren voor een speler.
+        // Reusable: small "..." button that opens a context menu with Steam
+        // profile/TruckersMP profile/copy ID for a player.
+        // The report screen. SEPARATE from the context button: that runs per
+        // player, and then this screen was drawn just as often.
+        void TekenReportScherm();
+
         void TekenSpelerContextKnop( const SpelerRecord &speler, const std::string &uniekeId );
 
-        // Tekent een klein zelfgetekend vrachtwagen- of bus-icoontje op de
-        // huidige cursorpositie (reserveert layout-ruimte via Dummy, dus
-        // gewoon ImGui::SameLine() erna gebruiken voor tekst ernaast).
+        // Draws a small hand-drawn truck or bus icon at the current cursor
+        // position (reserves layout space via Dummy, so just use
+        // ImGui::SameLine() afterwards for text next to it).
+        // Small passenger figure, meant to sit next to a count.
+        void TekenPassagierIcoon( float grootte, unsigned int kleur );
+
         void TekenVoertuigIcoon( bool isBus, float grootte = 20.0f );
 
-        // Eigen getekende zijbalk-icoontjes (i.p.v. tekstlabels of emoji,
-        // die respectievelijk saai en niet-ondersteund door ImGui's
-        // lettertype zijn). Tekent gecentreerd op de huidige cursorpositie
-        // binnen een grootte x grootte vierkant, kleur wordt meegegeven.
+        // Hand-drawn sidebar icons (instead of text labels or emoji, which
+        // are respectively dull and unsupported by ImGui's font). Draws
+        // centred on the current cursor position within a size x size square,
+        // colour is passed in.
         void TekenTabIcoon( int tabIndex, float middenX, float middenY, float straal, unsigned int kleur );
 
         TripLogger &m_logger;
@@ -136,35 +142,35 @@ namespace Ritten
         FuelCosts &m_brandstof;
         DiscordWebhook &m_discord;
 
-        // Publieke TruckersMP Web API: serverstatus en evenementen. Eigendom
-        // van de overlay zelf, want alleen de statistieken-tab gebruikt hem.
+        // Public TruckersMP Web API: server status and events. Owned by the
+        // overlay itself, because only the statistics tab uses it.
         WebApi m_webApi;
 
-        // --- VTC-integratie ------------------------------------------------
-        // Los van de rest aan te zetten. Het nummer staat in het adres van je
-        // VTC-pagina: truckersmp.com/vtc/<nummer>. Wordt bewaard in
-        // vtc.json, zodat het een herstart overleeft.
+        // --- VTC integration -----------------------------------------------
+        // Switched on separately from the rest. The number is in the address
+        // of your VTC page: truckersmp.com/vtc/<number>. Stored in vtc.json,
+        // so it survives a restart.
         bool m_vtcAan = false;
         int m_vtcId = 0;
         bool m_vtcTagsBijSpelers = true;
         bool m_vtcRadarMarkering = false;
         bool m_vtcConvooienTonen = true;
 
-        // Spelers opzoeken bij de Web API (voor VTC-nummer en patron). Kan
-        // helemaal uit: de markering werkt dan nog steeds op tags, alleen
-        // zonder verzoeken naar hun servers. Zie ook de 429 die we op
-        // 30-08 kregen -- hun limiet staat nergens gedocumenteerd, dus we
-        // gaan er zuinig mee om en laten de keuze bij jou.
+        // Look up players at the Web API (for VTC number and patron). Can be
+        // off entirely: the marking then still works on tags, only without
+        // requests to their servers. See also the 429 we got on 30-08 --
+        // their limit is documented nowhere, so we are frugal with it and
+        // leave the choice to you.
         bool m_vtcSpelersOpzoeken = false;
 
-        // Zelf aangevinkte convooien. De Web API kan niet vertellen waar jij
-        // je voor hebt aangemeld -- /events/user/{id} geeft wat je zelf hebt
-        // AANGEMAAKT, niet waar je je voor opgaf (gemeten 30-08: leeg
-        // antwoord terwijl er wel aanmeldingen waren). Vandaar zelf
-        // aanvinken: kost nul verzoeken en werkt gegarandeerd.
+        // Convoys ticked by yourself. The Web API cannot tell what you signed
+        // up for -- /events/user/{id} returns what you CREATED, not what you
+        // registered for (measured 30-08: empty answer while there were
+        // sign-ups). Hence ticking yourself: costs zero requests and is
+        // guaranteed to work.
         //
-        // Staat LOS van de VTC: ook zonder bedrijf meld je je voor convooien
-        // aan, en dan wil je die herinnering gewoon zien.
+        // SEPARATE from the VTC: even without a company you sign up for
+        // convoys, and then you simply want that reminder.
         bool m_eigenConvooien = false;
         std::vector<EvenementInfo> m_aangevinkt;
         bool IsAangevinkt( int evenementId ) const;
@@ -173,54 +179,74 @@ namespace Ritten
         char m_vtcIdBuffer[ 16 ] = "";
         bool m_vtcIdBufferGeladen = false;
 
-        // Tags die op de radar en in de lijst gemarkeerd worden, gescheiden
-        // door komma's. De SDK geeft de tag die in het spel voor iemands naam
-        // staat al mee (Player::GetTagText), en dat is bij VTC-leden meestal
-        // precies hun bedrijfstag -- dus hier zijn geen API-verzoeken per
-        // speler voor nodig. Je kunt er meerdere invullen, bijvoorbeeld als
-        // je bedrijf verschillende afdelingstags gebruikt.
+        // Tags that are marked on the radar and in the list, comma-separated.
+        // The SDK already passes the tag shown in front of someone's name in
+        // the game (Player::GetTagText), and for VTC members that is usually
+        // exactly their company tag -- so no API requests per player are
+        // needed here. You can enter several, for example if your company
+        // uses different department tags.
         char m_vtcTagsBuffer[ 128 ] = "";
         bool IsEigenVtc( const SpelerRecord &s ) const;
 
-        // De SDK-vlag IsPatron blijft op false staan, ook bij iemand die
-        // aantoonbaar patron is (gemeten 30-08). De Web API zegt het wel,
-        // en dat antwoord halen we toch al op voor het VTC-nummer.
+        // The SDK flag IsPatron stays false, even for someone who
+        // demonstrably is a patron (measured 30-08). The Web API does say
+        // it, and we fetch that answer anyway for the VTC number.
         bool IsPatron( const SpelerRecord &s ) const;
 
-        // Regeltje over een convooi dat er zo aan komt. Alleen voor
-        // convooien waar JIJ of je VTC zich voor heeft aangemeld -- een
-        // melding over een convooi waar je niks mee te maken hebt is ruis.
-        // Leeg = niets te melden, en dan wordt er ook niets getekend.
+        // Little line about a convoy coming up soon. Only for convoys YOU or
+        // your VTC signed up for -- a notice about a convoy you have nothing
+        // to do with is noise. Empty = nothing to report, and then nothing is
+        // drawn.
         std::string ConvooiHerinnering() const;
         void TekenConvooiHerinnering();
 
-        // Eén regel onder de kaartjes: rijd je deze rit zuiniger of
-        // onzuiniger dan je eigen gemiddelde uit het rittenlogboek? Leeg als
-        // er te weinig te vergelijken valt -- dan wordt er niets getekend.
-        void TekenZuinigheid();
+        // One line below the cards: are you driving this trip more or less
+        // economically than your own average from the trip log? Empty if
+        // there is too little to compare -- then nothing is drawn.
+        void TekenRijstijl();
 
-        // Aan/uit voor die zuinigheidsregel. Wordt bewaard in uiterlijk.json
-        // bij de andere weergavekeuzes.
+        // On/off for that economy line. Stored in uiterlijk.json with the
+        // other display choices.
         bool m_zuinigheidTonen = true;
 
-        // 0 = Nederlands, 1 = Engels. Nederlands is de basis: teksten zonder
-        // vertaling blijven gewoon Nederlands staan (zie Taal.hxx).
+        // Network switches, both default ON and remembered in uiterlijk.json:
+        // the TruckersMP Web API (server status, events) and the map table
+        // download from the CabNavi repository.
+        bool m_webApiAan = true;
+        bool m_kaartDownload = true;
+
+        // 0 = Dutch, 1 = English. Dutch is the base: texts without a
+        // translation simply stay Dutch (see Taal.hxx).
         int m_taal = 0;
 
-        // Uitgebreide diagnose in debug.log. Standaard uit: die regels zijn
-        // alleen nodig als er iets uitgezocht moet worden, en ze schrijven
-        // elke paar seconden naar schijf.
+        // Verbose diagnostics in debug.log. Default off: those lines are
+        // only needed while investigating something, and they write to disk
+        // every few seconds.
         bool m_uitgebreidLog = false;
+
+        // Show the real PC time at the top right of the header. Default on:
+        // handy to see the IRL time without alt-tab, and needed if you ever
+        // want to lay a screen recording next to debug.log.
+        bool m_klokTonen = true;
         static constexpr int HERINNERING_MINUTEN = 60;
         void LaadVtcInstellingen();
         void SlaVtcInstellingenOp();
         IncidentRecorder &m_incident;
-        int m_incidentFrameIndex = 0; // positie van de tijdlijn-schuif in de replay-viewer
+        int m_incidentFrameIndex = 0;  // position of the timeline slider in the replay viewer
 
-        // Voor het report-scherm (zie TekenSpelerContextKnop): welke speler
-        // en welke redenen er momenteel aangevinkt staan.
+        // For the report screen (see TekenSpelerContextKnop): which player
+        // and which reasons are currently ticked.
         SpelerRecord m_reportPopupSpeler;
         std::string m_reportPopupSpelerId;
+
+        // The report screen may only open AFTER the context popup is closed;
+        // otherwise the popup belongs to the wrong window and never appears.
+        // See the explanation in TekenSpelerContextKnop.
+        bool m_reportPopupOpenen = false;
+
+        // Which incident recording have we already shown? If this number
+        // changes there is a new impact and the slider jumps to the end.
+        int m_incidentTellerGezien = -1;
         std::vector<char> m_reportRedenenAangevinkt;
         char m_reportOmschrijving[ 1024 ] = "";
         char m_reportBewijsLink[ 256 ] = "";
@@ -228,24 +254,22 @@ namespace Ritten
         char m_webhookBuffer[ 256 ] = "";
         bool m_webhookBufferGeladen = false;
 
-        // Uiterlijk: doorzichtigheid en accentkleur, door de gebruiker zelf
-        // instelbaar op de Instellingen-tab en bewaard in
-        // %APPDATA%\CabNavi\uiterlijk.json.
+        // Appearance: transparency and accent colour, adjustable by the user
+        // on the Settings tab and stored in %APPDATA%\CabNavi\uiterlijk.json.
         float m_doorzichtigheid = 0.90f;
-        float m_iconenDoorzichtigheid = 0.95f; // losse schuif voor zijbalk/menu's/iconen
-        float m_accentKleur[ 3 ] = { 0.83f, 0.55f, 0.16f }; // warm amber/goud, zoals TMP's eigen interface
+        float m_iconenDoorzichtigheid = 0.95f;  // separate slider for sidebar/menus/icons
+        float m_accentKleur[ 3 ] = { 0.83f, 0.55f, 0.16f };  // warm amber/gold, like TMP's own interface
 
-        // Pad naar imgui.ini. MOET een lid zijn: io.IniFilename is een kale
-        // pointer die ImGui niet kopieert, dus een lokale string zou na
-        // afloop van de functie een bungelende pointer achterlaten.
+        // Path to imgui.ini. MUST be a member: io.IniFilename is a raw
+        // pointer ImGui does not copy, so a local string would leave a
+        // dangling pointer after the function ends.
         std::string m_iniPad;
 
 
-        // Voor het "levend voelende" scroll-effect op de minimap: een
-        // opgebouwde afstand die meebeweegt met je echte snelheid (geen
-        // echte positie, puur een visueel gevoel van beweging -- zie de
-        // opmerking in PlayersNearby.hxx over waarom we geen echte GPS
-        // hebben).
+        // For the "alive-feeling" scroll effect on the minimap: an
+        // accumulated distance that moves with your real speed (no real
+        // position, purely a visual sense of motion -- see the note in
+        // PlayersNearby.hxx about why we have no real GPS).
         float m_minimapScrollKm = 0.0f;
         std::chrono::steady_clock::time_point m_minimapLaatsteUpdate;
         bool m_uiterlijkGeladen = false;
@@ -253,99 +277,96 @@ namespace Ritten
         void SlaUiterlijkOp() const;
         unsigned int AccentKleurU32( float alpha = 1.0f ) const;
 
-        // --- Gedeelde bouwstenen voor de kaartenstijl ------------------
-        // Deze stonden eerst als losse lambda's in TekenLiveTab, waardoor
-        // nieuwe onderdelen (zoals de boordcomputer) er per ongeluk naast
-        // gingen zitten met platte tekst. Nu als methodes, zodat elk nieuw
-        // blok dezelfde vormtaal krijgt.
+        // --- Shared building blocks for the card style ------------------
+        // These used to be loose lambdas in TekenLiveTab, so new parts (like
+        // the board computer) accidentally sat next to them with plain text.
+        // Now as methods, so every new block gets the same visual language.
 
-        // Sectiekop in de accentkleur, met een dun lijntje eronder.
-        // Donkere, altijd-leesbare achtergrond voor kaartjes; zie de
-        // uitleg bij de implementatie waarom niet wit-transparant.
+        // Section header in the accent colour, with a thin line below.
+        // Dark, always-readable background for cards; see the explanation at
+        // the implementation for why not white-transparent.
         ImVec4 KaartKleur() const;
         ImVec4 TintKaartKleur( const ImVec4 &tint, float sterkte ) const;
 
         void KopBalk( const char *tekst );
 
-        // Kaartje met klein label boven en de waarde groot eronder.
-        // `onderschrift` is optioneel (bv. de eenheid).
-        // `waarschuwing` maakt de kaart rood in plaats van neutraal, voor
-        // gevallen als "je rijdt te hard".
-        // `compact` maakt de kaart lager: label en onderschrift in het kleine
-        // lettertype, en de waarde in het normale in plaats van het grote
-        // kopfont. Bedoeld voor de bus-tab, waar de haltelijst de ruimte
-        // harder nodig heeft. De breedte blijft ongemoeid.
+        // Card with a small label on top and the value large below.
+        // `onderschrift` is optional (e.g. the unit).
+        // `waarschuwing` makes the card red instead of neutral, for cases
+        // like "you are speeding".
+        // `compact` makes the card lower: label and caption in the small
+        // font, and the value in the normal one instead of the large header
+        // font. Meant for the bus tab, where the stop list needs the space
+        // more. The width is left alone.
         void StatKaart( const char *label, const std::string &waarde, float breedte,
                          const char *onderschrift = nullptr, bool waarschuwing = false,
                          bool compact = false );
 
-        // Berekent hoe hoog een stat-kaartje moet zijn op basis van de
-        // werkelijke lettergroottes. Een vast getal ging mis zodra het
-        // kop-lettertype groter werd dan gepland: het onderschrift viel er
-        // dan onderuit en er kwam een scrollbalkje in het kaartje.
+        // Computes how high a stat card must be based on the actual font
+        // sizes. A fixed number went wrong as soon as the header font got
+        // larger than planned: the caption fell out and a scrollbar appeared
+        // in the card.
         float KaartHoogte( bool metOnderschrift, bool compact = false ) const;
 
-        // Regel met naam links, een gekleurd balkje rechts en het percentage
-        // erachter. Kleur loopt van groen via amber naar rood. Een negatieve
-        // waarde betekent "onbekend" en toont een grijs, leeg balkje.
-        // Regel met naam links, een gekleurd balkje rechts en het percentage
-        // erachter. Kleur loopt van groen via amber naar rood, tenzij
-        // `kleurOverride` gezet is -- dan wordt die kleur gebruikt in
-        // plaats van de schade-drempels (zodat andere balken, zoals de
-        // tachograaf, dezelfde compacte stijl kunnen hergebruiken met hun
-        // eigen kleurlogica). ImU32 is gewoon een unsigned int (typedef uit
-        // imgui.h) -- die include willen we niet in de header, dus hier
-        // geschreven als het onderliggende type.
-        // `breedte` = 0 betekent "gebruik de rest van de regel". Geef een
-        // waarde mee om balken naast elkaar in kolommen te zetten; de functie
-        // rekent dan relatief vanaf de huidige cursorpositie, zodat een
-        // tweede kolom niet over de eerste heen valt.
+        // Line with the name on the left, a coloured bar on the right and the
+        // percentage after it. Colour runs from green via amber to red. A
+        // negative value means "unknown" and shows a grey, empty bar.
+        // Line with the name on the left, a coloured bar on the right and the
+        // percentage after it. Colour runs from green via amber to red,
+        // unless `kleurOverride` is set -- then that colour is used instead
+        // of the damage thresholds (so other bars, like the tachograph, can
+        // reuse the same compact style with their own colour logic). ImU32
+        // is just an unsigned int (typedef from imgui.h) -- we do not want
+        // that include in the header, so written here as the underlying type.
+        // `breedte` = 0 means "use the rest of the line". Pass a value to put
+        // bars side by side in columns; the function then computes relative
+        // to the current cursor position, so a second column does not fall
+        // over the first.
         void SchadeBalk( const char *naam, double percentage, const unsigned int *kleurOverride = nullptr,
                           float labelBreedte = 100.0f, float breedte = 0.0f );
 
-        // Logo laden als DirectX11-textuur zodat ImGui::Image() 'm kan
-        // tekenen. Verwacht %APPDATA%\CabNavi\logo.png. Faalt
-        // stil (logo blijft leeg, overlay werkt gewoon door) als het
-        // bestand er niet is -- niet elke gebruiker heeft per se een logo.
+        // Load the logo as a DirectX11 texture so ImGui::Image() can draw
+        // it. Expects %APPDATA%\CabNavi\logo.png. Fails quietly (logo stays
+        // empty, overlay just keeps working) if the file is not there -- not
+        // every user necessarily has a logo.
         void LaadLogo();
-        void *m_logoTextuur = nullptr; // ID3D11ShaderResourceView*, als void* om geen D3D-include in de header nodig te hebben
+        void *m_logoTextuur = nullptr;  // ID3D11ShaderResourceView*, as void* to avoid a D3D include in the header
         int m_logoBreedte = 0;
         int m_logoHoogte = 0;
 
-        // Zes kleurrijke tab-icoontjes (Live/Spelers/Geschiedenis/
-        // Statistieken/Incident/Instellingen), zelfgetekend en als PNG
-        // geladen -- ImGui kan geen kleuremoji tonen, dit is de manier om
-        // toch die kleurrijke "app-icoon"-look te krijgen.
-        // Aantal tabbladen in de zijbalk. Als constante, zodat het aantal
-        // maar op EEN plek staat -- er zijn vier lussen die eroverheen lopen
-        // en die liepen eerder allemaal met een los ingetypte 6.
+        // Six colourful tab icons (Live/Players/History/Statistics/Incident/
+        // Settings), hand-drawn and loaded as PNG -- ImGui cannot show colour
+        // emoji, this is the way to still get that colourful "app icon" look.
+        // Number of tabs in the sidebar. As a constant, so the count is in
+        // ONE place -- there are four loops over it and they all used to run
+        // with a loosely typed 6.
         static constexpr int AANTAL_TABS = 9;
         void *m_tabTexturen[ AANTAL_TABS ] = {};
         void LaadTabIconen();
 
-        // Tweede, groter lettertype voor kerncijfers (ETA, tachograaf-tijd,
-        // statistiek-kaartjes) -- geeft die het "grote getal, klein
-        // label"-gevoel van de mockups, i.p.v. alles even groot. Als
-        // ImFont* opgeslagen (imgui.h wordt al elders in Overlay.cxx
-        // geincludeerd, dus geen void*-omweg nodig zoals bij de textuur).
+        // Second, larger font for key figures (ETA, tachograph time, stat
+        // cards) -- gives them the "big number, small label" feel of the
+        // mockups, instead of everything the same size. Stored as ImFont*
+        // (imgui.h is already included elsewhere in Overlay.cxx, so no void*
+        // detour needed like with the texture).
         ImFont *m_kopFont = nullptr;
 
-        // Derde lettertype: kleiner dan de standaard 19pt, voor kaarten met
-        // veel korte regels naast elkaar (schade, aanhanger, tachograaf).
-        // Zonder dit werd de tekst daar afgekapt zodra het venster smaller
-        // stond, en bleef er nauwelijks ruimte over voor de balkjes.
+        // Third font: smaller than the default 19pt, for cards with many
+        // short lines side by side (damage, trailer, tachograph). Without it
+        // the text there got cut off as soon as the window was narrower, and
+        // hardly any room was left for the bars.
         ImFont *m_kleinFont = nullptr;
 
-        // Staat het kleine lettertype nu actief? SchadeBalk gebruikt dit om
-        // het PERCENTAGE even in het gewone (grotere) font te zetten: het
-        // getal is waar je naar kijkt, het label eromheen mag klein blijven.
+        // Is the small font active right now? SchadeBalk uses this to put the
+        // PERCENTAGE briefly in the normal (larger) font: the number is what
+        // you look at, the label around it may stay small.
         bool m_kleinFontActief = false;
 
         bool m_geinitialiseerd = false;
         bool m_zichtbaar = true;
-        // Volgorde moet gelijklopen met `bestandsnamen[]` in LaadTabIconen,
-        // de switch in Teken() en de terugval-iconen -- vier plekken. Bij het
-        // invoegen van Boordcomputer schoven de nummers erachter allemaal op.
+        // Order must match `bestandsnamen[]` in LaadTabIconen, the switch in
+        // Teken() and the fallback icons -- four places. When Boordcomputer
+        // was inserted all the numbers after it shifted.
         //   0=Live 1=Boordcomputer 2=Spelers 3=Geschiedenis
         //   4=Statistieken 5=Incident 6=Instellingen
         int m_actieveTab = 0;

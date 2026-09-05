@@ -10,7 +10,7 @@ using json = nlohmann::json;
 
 namespace Ritten
 {
-    // ---- (de)serialisatie ---------------------------------------------
+    // ---- (de)serialisation --------------------------------------------
 
     static std::string TripTypeStr( TripType t )
     {
@@ -51,7 +51,7 @@ namespace Ritten
         j[ "brandstof_verbruik_liters" ] = t.brandstofVerbruikLiters;
         j[ "brandstof_kosten_euro" ] = t.brandstofKostenEuro;
 
-        // Onkosten die het spel zelf gemeld heeft (echte in-game bedragen)
+        // Expenses the game itself reported (real in-game amounts)
         j[ "tol_kosten" ] = t.tolKosten;
         j[ "veerboot_kosten" ] = t.veerbootKosten;
         j[ "trein_kosten" ] = t.treinKosten;
@@ -78,6 +78,7 @@ namespace Ritten
         j[ "doorgangen" ] = doorgangen;
 
         j[ "aanhanger_schade_pct" ] = t.aanhangerSchadePercentage;
+        j[ "chassis_schade_pct" ] = t.schadeChassisPercentage;
         j[ "lading_schade_pct" ] = t.ladingSchadePercentage;
         j[ "lading_gewicht_kg" ] = t.ladingGewichtKg;
 
@@ -88,15 +89,20 @@ namespace Ritten
         for( const StopInfo &s : t.haltes )
         {
             haltes.push_back( { { "naam", s.naam },
+                                 { "city_identifier", s.cityIdentifier },
                                  { "voltooid", s.voltooid },
-                                 { "afgelegde_afstand_km", s.afgelegdeAfstandKm } } );
+                                 { "afgelegde_afstand_km", s.afgelegdeAfstandKm },
+                                 { "geplande_afstand_km", s.geplandeAfstandKm },
+                                 { "instappers", s.instappers },
+                                 { "uitstappers", s.uitstappers } } );
         }
         j[ "haltes" ] = haltes;
+        j[ "passagiers" ] = t.passagiers;
 
         return j;
     }
 
-    // ---- opslagpad -------------------------------------------------------
+    // ---- storage path -------------------------------------------------
 
     std::filesystem::path TripLogger::BepaalOpslagPad()
     {
@@ -115,7 +121,7 @@ namespace Ritten
         return basis / "trips.jsonl";
     }
 
-    // ---- levenscyclus ------------------------------------------------
+    // ---- lifecycle ----------------------------------------------------
 
     TripLogger::TripLogger()
         : m_bestandsPad( BepaalOpslagPad() )
@@ -133,29 +139,52 @@ namespace Ritten
         }
     }
 
+    // Add one trip to the totals. DELIBERATELY in one place: this used
+    // to happen twice separately (when completing a trip and when loading
+    // trips.jsonl), and then the two versions drift apart sooner or later.
+    //
+    // Two rules that were not there before:
+    //  1. Cancelled trips do NOT count in counts, distance or money. They
+    //     were counted, so the counters were higher than the number of
+    //     trips you actually drove.
+    //  2. Only REAL income counts. There was a fallback to the ESTIMATED
+    //     payout when income was zero -- exactly what happens for a
+    //     cancelled trip. MEASURED in a real trips.jsonl: the statistics
+    //     tab showed 117,637 earned where the real income was 54,055.
+    void TripLogger::TelMee( const Trip &t )
+    {
+        if( t.status == TripStatus::Geannuleerd )
+        {
+            m_totalen.aantalGeannuleerd++;
+            return;
+        }
+
+        if( t.type == TripType::Bus ) m_totalen.aantalBusRitten++;
+        else m_totalen.aantalVrachtRitten++;
+
+        m_totalen.totaalAfstandKm += t.afgelegdeAfstandKm;
+        m_totalen.totaalInkomen += t.inkomen;
+        m_totalen.totaalBrandstofKostenEuro += t.brandstofKostenEuro;
+        m_totalen.totaalBoeteKosten += t.boeteKosten;
+        m_totalen.totaalTolKosten += t.tolKosten;
+        m_totalen.totaalVeerbootKosten += t.veerbootKosten;
+        m_totalen.totaalTreinKosten += t.treinKosten;
+
+        if( t.brandstofVerbruikLiters > 0.0 && t.afgelegdeAfstandKm > 1.0 )
+        {
+            m_totalen.gemetenLiters += t.brandstofVerbruikLiters;
+            m_totalen.gemetenKm += t.afgelegdeAfstandKm;
+        }
+    }
+
     void TripLogger::RegisterVoltooideRit( Trip trip )
     {
-        // Direct de in-memory totalen bijwerken zodat de overlay meteen
-        // klopt, ook al moet het wegschrijven naar disk nog gebeuren.
+        // Update the in-memory totals right away so the overlay is correct
+        // immediately, even though writing to disk still has to happen.
         {
             std::lock_guard<std::mutex> lock( m_dataMutex );
             m_geschiedenis.push_back( trip );
-            if( trip.type == TripType::Bus )
-            {
-                m_totalen.aantalBusRitten++;
-            }
-            else
-            {
-                m_totalen.aantalVrachtRitten++;
-            }
-            m_totalen.totaalAfstandKm += trip.afgelegdeAfstandKm;
-            m_totalen.totaalInkomen += trip.inkomen != 0 ? trip.inkomen : trip.geschatUitbetaling;
-            m_totalen.totaalBrandstofKostenEuro += trip.brandstofKostenEuro;
-            if( trip.brandstofVerbruikLiters > 0.0 && trip.afgelegdeAfstandKm > 1.0 )
-            {
-                m_totalen.gemetenLiters += trip.brandstofVerbruikLiters;
-                m_totalen.gemetenKm += trip.afgelegdeAfstandKm;
-            }
+            TelMee( trip );
         }
 
         if( m_voltooidCallback )
@@ -235,15 +264,15 @@ namespace Ritten
                 t.geschatUitbetaling = j.value( "geschatte_uitbetaling", (std::int64_t)0 );
                 t.brandstofVerbruikLiters = j.value( "brandstof_verbruik_liters", 0.0 );
                 t.brandstofKostenEuro = j.value( "brandstof_kosten_euro", 0.0 );
-                // Nieuwe velden -- oude regels in trips.jsonl hebben deze
-                // niet, vandaar de standaardwaarde 0. Die ritten tellen dus
-                // met 0 onkosten mee, wat klopt: we hebben ze toen simpelweg
-                // niet gemeten.
+                // New fields -- old lines in trips.jsonl do not have them, hence the
+                // default 0. Those trips count with 0 expenses, which is correct: we
+                // simply did not measure them back then.
                 t.tolKosten = j.value( "tol_kosten", (std::int64_t)0 );
                 t.veerbootKosten = j.value( "veerboot_kosten", (std::int64_t)0 );
                 t.treinKosten = j.value( "trein_kosten", (std::int64_t)0 );
                 t.boeteKosten = j.value( "boete_kosten", (std::int64_t)0 );
                 t.aanhangerSchadePercentage = j.value( "aanhanger_schade_pct", 0.0 );
+                t.schadeChassisPercentage = j.value( "chassis_schade_pct", 0.0 );
                 t.ladingSchadePercentage = j.value( "lading_schade_pct", 0.0 );
                 t.ladingGewichtKg = j.value( "lading_gewicht_kg", 0.0 );
                 if( j.contains( "boetes" ) && j[ "boetes" ].is_array() )
@@ -256,11 +285,31 @@ namespace Ritten
                         t.boetes.push_back( std::move( boete ) );
                     }
                 }
+                // Read the stops back. They were WRITTEN but never read, so the
+                // history of a bus trip was empty after a restart: zero stops, zero
+                // passengers.
+                if( j.contains( "haltes" ) && j[ "haltes" ].is_array() )
+                {
+                    for( const auto &h : j[ "haltes" ] )
+                    {
+                        StopInfo halte;
+                        halte.naam = h.value( "naam", "" );
+                        halte.cityIdentifier = h.value( "city_identifier", "" );
+                        halte.voltooid = h.value( "voltooid", false );
+                        halte.afgelegdeAfstandKm = h.value( "afgelegde_afstand_km", 0.0 );
+                        halte.geplandeAfstandKm = h.value( "geplande_afstand_km", 0.0 );
+                        halte.instappers = h.value( "instappers", 0 );
+                        halte.uitstappers = h.value( "uitstappers", 0 );
+                        t.haltes.push_back( std::move( halte ) );
+                    }
+                }
+                t.passagiers = j.value( "passagiers", (std::uint32_t)0 );
+
                 geladen.push_back( std::move( t ) );
             }
             catch( ... )
             {
-                // corrupte regel overslaan
+                // skip a corrupt line
             }
         }
 
@@ -269,16 +318,7 @@ namespace Ritten
         m_totalen = Totals{};
         for( const Trip &t : m_geschiedenis )
         {
-            if( t.type == TripType::Bus ) m_totalen.aantalBusRitten++;
-            else m_totalen.aantalVrachtRitten++;
-            m_totalen.totaalAfstandKm += t.afgelegdeAfstandKm;
-            m_totalen.totaalInkomen += t.inkomen != 0 ? t.inkomen : t.geschatUitbetaling;
-            m_totalen.totaalBrandstofKostenEuro += t.brandstofKostenEuro;
-            if( t.brandstofVerbruikLiters > 0.0 && t.afgelegdeAfstandKm > 1.0 )
-            {
-                m_totalen.gemetenLiters += t.brandstofVerbruikLiters;
-                m_totalen.gemetenKm += t.afgelegdeAfstandKm;
-            }
+            TelMee( t );
         }
     }
 

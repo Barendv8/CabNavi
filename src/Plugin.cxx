@@ -1,12 +1,12 @@
 // Plugin.cxx
 //
-// CabNavi -- alles-in-1 rittenlogboek + live HUD voor TruckersMP.
-//   - Reguliere vrachtjobs: via de SCS Telemetry SDK (scs_telemetry_init).
-//   - Buslijn-jobs: via TruckersMP::BusModule (TruckersMP Client SDK).
-//   - Live overlay: ImGui, getekend via de Render-module (DirectX11).
-//   - Geschiedenis: weggeschreven naar %APPDATA%\CabNavi\trips.jsonl.
+// CabNavi -- all-in-one trip log + live HUD for TruckersMP.
+//   - Regular cargo jobs: via the SCS Telemetry SDK (scs_telemetry_init).
+//   - Bus line jobs: via TruckersMP::BusModule (TruckersMP Client SDK).
+//   - Live overlay: ImGui, drawn via the Render module (DirectX11).
+//   - History: written to %APPDATA%\CabNavi\trips.jsonl.
 //
-// Bouwinstructies staan in README.md.
+// Build instructions are in README.md.
 
 #include <TruckersMP/TruckersMP.hxx>
 #include <scssdk_telemetry.h>
@@ -20,6 +20,7 @@
 #include "DiscordWebhook.hxx"
 #include "IncidentRecorder.hxx"
 #include "FuelCosts.hxx"
+#include "Kaartdata.hxx"
 #include "Overlay.hxx"
 #include "PlayersNearby.hxx"
 #include "TripLogger.hxx"
@@ -28,6 +29,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <vector>
 #include <system_error>
 
 namespace
@@ -42,11 +44,11 @@ namespace
     std::unique_ptr<Ritten::PlayersNearby> g_spelers;
     std::unique_ptr<Ritten::Overlay> g_overlay;
 
-    // De TruckersMP Client SDK geeft geen HWND van het spelvenster mee --
-    // deze plugin draait in hetzelfde proces als het spel (het is een DLL
-    // die erin geladen wordt), dus we zoeken het echte, zichtbare
-    // hoofdvenster van dit proces zelf op via de standaard Windows-aanpak
-    // voor dit soort in-process plugins.
+    // The TruckersMP Client SDK does not pass an HWND of the game window
+    // -- this plugin runs in the same process as the game (it is a DLL
+    // loaded into it), so we look up the real, visible main window of
+    // this process ourselves via the standard Windows approach for this
+    // kind of in-process plugin.
     HWND ZoekSpelvenster()
     {
         struct ZoekData
@@ -66,34 +68,41 @@ namespace
                     && IsWindowVisible( hwnd ) )
                 {
                     data->gevonden = hwnd;
-                    return FALSE; // stoppen, we hebben 'm
+                    return FALSE;  // stop, we have it
                 }
-                return TRUE; // doorgaan zoeken
+                return TRUE;  // keep searching
             },
             reinterpret_cast<LPARAM>( &data ) );
 
         return data.gevonden;
     }
-    // Vraagt de muiscursor op bij het spel en blokkeert (LOCKT) het spel
-    // zelf voor muisinput, zodat de camera niet meedraait terwijl je op de
-    // overlay klikt. LET OP: bij de vorige poging stond deze logica
-    // omgedraaid (false i.p.v. true bij het openen) -- "locked" betekent
-    // dat het SPEL de muis niet gebruikt, niet dat de cursor vergrendeld
-    // wordt voor ons. Zie InputModule in de SDK-docs.
+    // Requests the mouse cursor from the game and LOCKS the game itself
+    // for mouse input, so the camera does not turn while you click on the
+    // overlay. NOTE: in the previous attempt this logic was inverted
+    // (false instead of true when opening) -- "locked" means the GAME
+    // does not use the mouse, not that the cursor is locked for us. See
+    // InputModule in the SDK docs.
     bool g_muisOpgevraagd = false;
+
     void ZetMuisVoorOverlay( bool actief )
     {
+        // NO more "syncing" with IsGameMouseLocked(). MEASURED 03-09: that
+        // query returns the GAME's state, including what it does itself in
+        // menus. Pulling our bool towards it kept detaching it from our own
+        // IncreaseMouseRef counter -- and that is exactly how a mouse can get
+        // stuck. What does fix the hang is releasing the mouse as soon as the
+        // game pauses (see OnPostRender), and that works.
         if( !g_session || actief == g_muisOpgevraagd ) return;
 
         if( actief )
         {
-            g_session->Input().IncreaseMouseRef();   // vraag de cursor op
-            g_session->Input().SetGameMouseLocked( true ); // spel negeert de muis nu
+            g_session->Input().IncreaseMouseRef();  // request the cursor
+            g_session->Input().SetGameMouseLocked( true );  // game now ignores the mouse
         }
         else
         {
-            g_session->Input().SetGameMouseLocked( false ); // spel krijgt de muis weer terug
-            g_session->Input().DecreaseMouseRef();   // geef de cursor terug
+            g_session->Input().SetGameMouseLocked( false );  // game gets the mouse back
+            g_session->Input().DecreaseMouseRef();  // give the cursor back
         }
         g_muisOpgevraagd = actief;
     }
@@ -104,7 +113,7 @@ namespace
 
         if( g_session->Render().GetRendererID() != TruckersMP::RendererID::DirectX11 )
         {
-            Ritten::Logboek::Schrijf( "start", "AFGEBROKEN: renderer is geen DirectX11" );
+            Ritten::Logboek::Schrijf( "start", "ABORTED: renderer is not DirectX11" );
             g_session->Core().LogMessage( TruckersMP::LogLevel::Warning,
                 "CabNavi: alleen DirectX11 wordt momenteel ondersteund voor de overlay-rendering." );
             return;
@@ -113,7 +122,7 @@ namespace
         auto *device = reinterpret_cast<ID3D11Device *>( g_session->Render().GetDeviceHandle().value_or( 0 ) );
         if( !device )
         {
-            Ritten::Logboek::Schrijf( "start", "AFGEBROKEN: geen D3D11-device van de SDK gekregen" );
+            Ritten::Logboek::Schrijf( "start", "ABORTED: no D3D11 device received from the SDK" );
             return;
         }
 
@@ -143,15 +152,84 @@ namespace
 
         g_session->Render().OnPostRender.Register( []
         {
+            // Record the thread ID once. Compare this with the line from
+            // GameTimeCallback: if the two numbers differ, drawing and SCS
+            // telemetry run on separate threads and share the same fields in
+            // TruckTracking without a lock.
+            static bool renderThreadGelogd = false;
+            if( !renderThreadGelogd )
+            {
+                renderThreadGelogd = true;
+                Ritten::Logboek::Schrijf( "flags", "thread id OnPostRender (drawing): "
+                                                        + std::to_string( Ritten::Logboek::HuidigeThreadId() ) );
+            }
+
             if( g_incidentRecorder && g_spelers )
             {
+                // FIRST refresh the positions, THEN the snapshot. This loop used to
+                // live only in TekenSpelersTab, so a player's bearing was as old as
+                // the last time you looked at that tab. If you were on Live when you
+                // hit something, the recorder captured players without a usable
+                // position and the incident radar stayed empty. VerversPosities has
+                // its own brake, so this does not cost work every frame.
+                g_spelers->VerversPosities();
                 g_incidentRecorder->Tick( g_spelers->GeefSpelers() );
             }
-            // Ook g_overlay controleren. De twee hierboven werden al
-            // gecontroleerd, deze niet -- terwijl dit event ook kan vuren
-            // terwijl de plugin wordt afgesloten of nog niet klaar is.
-            // Tekenen achter een vangnet. Een fout hier zou anders het spel
-            // meesleuren; nu belandt hij in debug.log met de laatste plek erbij.
+
+            // Stay out of the way while you are not in the world.
+            //
+            // Two signals, because the TruckersMP SDK has no query like "is a
+            // menu open":
+            //   1. Not connected -- that is the main menu at startup.
+            //   2. Paused -- the game reports that itself via SCS telemetry as
+            //      soon as the simulation halts, and that happens in a menu or
+            //      a garage screen.
+            //
+            // In both cases also give the MOUSE back. Otherwise the overlay's
+            // orange cursor stayed over the game's menu, while the TruckersMP HUD
+            // does remove its own.
+            const bool verbonden = g_session
+                                   && g_session->Network().IsConnected().value_or( true );
+            const bool gepauzeerd = g_vrachtTracking && g_vrachtTracking->IsGepauzeerd();
+            const bool uitDeWeg = !verbonden || gepauzeerd;
+
+            // Give the mouse back ONCE when entering the pause, not every frame.
+            // Otherwise we queried the mouse state from the SDK sixty times a
+            // second, and the sync message could land in debug.log every frame.
+            static bool wasUitDeWeg = false;
+            if( uitDeWeg && !wasUitDeWeg )
+            {
+                ZetMuisVoorOverlay( false );
+                Ritten::Logboek::Schrijf( "flags", std::string( "overlay out of the way: " )
+                    + ( !verbonden ? "not connected" : "paused" ) );
+            }
+            if( !uitDeWeg && wasUitDeWeg )
+            {
+                Ritten::Logboek::Schrijf( "flags", "overlay back" );
+            }
+            wasUitDeWeg = uitDeWeg;
+
+            // Measurement: what does the SDK say about the mouse when the game
+            // itself shows a menu or garage? Only log when something changes.
+            {
+                const auto zichtbaar = g_session->Input().IsMouseVisible().value_or( false );
+                const auto vergrendeld = g_session->Input().IsGameMouseLocked().value_or( false );
+                static bool vorigZ = false, vorigV = false, eerste = true;
+                if( eerste || zichtbaar != vorigZ || vergrendeld != vorigV )
+                {
+                    eerste = false; vorigZ = zichtbaar; vorigV = vergrendeld;
+                    Ritten::Logboek::Schrijf( "flags", std::string( "mouse: visible=" )
+                        + ( zichtbaar ? "yes" : "no" ) + " gameMouseLocked=" + ( vergrendeld ? "yes" : "no" )
+                        + " requestedByUs=" + ( g_muisOpgevraagd ? "yes" : "no" ) );
+                }
+            }
+            if( uitDeWeg ) return;
+
+            // Also check g_overlay. The two above were already checked, this one
+            // not -- while this event can also fire while the plugin is shutting
+            // down or not ready yet.
+            // Draw behind a safety net. An error here would otherwise take the
+            // game down; now it lands in debug.log with the last location.
             if( g_overlay )
             {
                 try
@@ -160,22 +238,22 @@ namespace
                 }
                 catch( const std::exception &ex )
                 {
-                    Ritten::Logboek::Schrijf( "FOUT",
-                        std::string( "Exceptie tijdens tekenen: " ) + ex.what()
-                        + " | laatste plek: " + Ritten::Logboek::LaatstBekend() );
+                    Ritten::Logboek::Schrijf( "ERROR",
+                        std::string( "Exception while drawing: " ) + Ritten::Logboek::KorteFout( ex.what() )
+                        + " | last location: " + Ritten::Logboek::LaatstBekend() );
                 }
                 catch( ... )
                 {
-                    Ritten::Logboek::Schrijf( "FOUT",
-                        std::string( "Onbekende exceptie tijdens tekenen | laatste plek: " )
+                    Ritten::Logboek::Schrijf( "ERROR",
+                        std::string( "Unknown exception while drawing | last location: " )
                         + Ritten::Logboek::LaatstBekend() );
                 }
             }
         } );
 
-        // Insert schakelt de overlay zelf aan/uit. Dit gebeurt ALTIJD (ook
-        // als de overlay verborgen is), zodat je 'm weer terug kunt halen.
-        // 0x2D is de Windows virtual-key code voor Insert (VK_INSERT).
+        // Insert toggles the overlay itself on/off. This ALWAYS happens (even
+        // when the overlay is hidden), so you can bring it back.
+        // 0x2D is the Windows virtual-key code for Insert (VK_INSERT).
         g_session->Input().OnKey.Register( []( TruckersMP::InputKeyEvent &e )
         {
             if( !g_overlay ) return;
@@ -187,16 +265,15 @@ namespace
                 g_overlay->SchakelZichtbaarheid();
                 if( !g_overlay->IsZichtbaar() )
                 {
-                    // Overlay verborgen: muis sowieso teruggeven aan het
-                    // spel, ook als de rechtermuisknop toevallig nog
-                    // ingedrukt was.
+                    // Overlay hidden: give the mouse back to the game regardless, even if
+                    // the right mouse button happened to still be down.
                     ZetMuisVoorOverlay( false );
                 }
                 return;
             }
 
-            // Toetsenbord doorgeven aan de overlay (voor het typen in het
-            // brandstofprijs-/webhook-veld op Instellingen).
+            // Pass the keyboard to the overlay (for typing in the fuel price /
+            // webhook field on Settings).
             g_overlay->OpToets( e.GetKey(), e.GetDown() );
         } );
 
@@ -206,12 +283,11 @@ namespace
             g_overlay->OpKarakter( e.GetCharacter() );
         } );
 
-        // LET OP: geen SetBlock() meer op individuele muisklikken -- dat
-        // brak eerder TMP's eigen interface. SetGameMouseLocked hierboven
-        // regelt nu op SDK-niveau of het spel zelf iets met de muis doet;
-        // wij hoeven dus niks meer handmatig te blokkeren, alleen de
-        // events doorgeven aan onze eigen overlay zodat die erop kan
-        // reageren.
+        // NOTE: no more SetBlock() on individual mouse clicks -- that broke
+        // TMP's own interface earlier. SetGameMouseLocked above now handles
+        // at SDK level whether the game itself does anything with the mouse;
+        // so we no longer need to block anything manually, only pass the
+        // events to our own overlay so it can react.
         g_session->Input().OnMouseMove.Register( []( TruckersMP::InputMouseMoveEvent &e )
         {
             if( !g_overlay ) return;
@@ -222,12 +298,26 @@ namespace
         {
             if( !g_overlay ) return;
 
-            // Eén klik op de rechtermuisknop schakelt "muismodus" aan/uit
-            // (niet vasthouden) -- net als Insert voor de overlay zelf.
+            // One click of the right mouse button toggles "mouse mode" on/off
+            // (no holding) -- like Insert for the overlay itself.
             if( e.GetButton() == TruckersMP::MouseButton::Right && e.GetDown() && g_overlay->IsZichtbaar() )
             {
+                // Is the game paused? Then you are in an ETS2 menu -- the map, the
+                // garage, the pause menu. There the right mouse button belongs to the
+                // game: on the map you drag the map with it. We do not intercept that
+                // click, otherwise our mouse toggles on every drag. TruckersMP also
+                // keeps quiet in those menus.
+                //
+                // MEASURED 03-09: IsMouseVisible() does NOT see the game's menu mouse
+                // (only returns our own request), but the SCS pause event does fire
+                // on TruckersMP. Hence this signal.
+                if( g_vrachtTracking && g_vrachtTracking->IsGepauzeerd() )
+                {
+                    return;  // leave it to the game, do nothing
+                }
+
                 ZetMuisVoorOverlay( !g_muisOpgevraagd );
-                return; // deze klik zelf niet ook nog als "klik op de overlay" doorgeven
+                return;  // do not also pass this click as a "click on the overlay"
             }
 
             g_overlay->OpMuisKnop( static_cast<int>( e.GetButton() ), e.GetDown() );
@@ -236,8 +326,61 @@ namespace
         g_session->Input().OnMouseWheel.Register( []( TruckersMP::InputMouseWheelEvent &e )
         {
             if( !g_overlay ) return;
-            g_overlay->OpMuisWiel( static_cast<float>( e.GetDelta() ) );
+
+            // Windows counts the wheel in steps of 120 per notch; ImGui expects
+            // about 1.0 per notch. Passing it undivided turned one notch into a
+            // hundred and twenty lines, and you jumped from top to bottom without
+            // seeing anything in between. Only divide when the number really
+            // comes from that scale -- if the SDK ever gives a normalised value,
+            // it is left alone.
+            float delta = static_cast<float>( e.GetDelta() );
+            if( delta > 2.0f || delta < -2.0f ) delta /= 120.0f;
+            g_overlay->OpMuisWiel( delta );
         } );
+    }
+}
+
+namespace Ritten
+{
+    // Product version of the game executable this DLL runs in, e.g.
+    // "1.60.1.7" -- from the file version resource. NOT the SCS telemetry
+    // version in scs_telemetry_init (that is 1.19 for ETS2 1.60; MEASURED
+    // 05-09, it made the map-table comparison nonsense). Empty if unreadable.
+    std::string SpelVersie()
+    {
+#ifdef _WIN32
+        wchar_t buf[ MAX_PATH ];
+        const DWORD n = GetModuleFileNameW( nullptr, buf, MAX_PATH );
+        if( n == 0 || n >= MAX_PATH ) return {};
+        DWORD dummy = 0;
+        const DWORD maat = GetFileVersionInfoSizeW( buf, &dummy );
+        if( maat == 0 ) return {};
+        std::vector<std::uint8_t> blok( maat );
+        if( !GetFileVersionInfoW( buf, 0, maat, blok.data() ) ) return {};
+        VS_FIXEDFILEINFO *ffi = nullptr; UINT len = 0;
+        if( !VerQueryValueW( blok.data(), L"\\", reinterpret_cast<LPVOID *>( &ffi ), &len ) || !ffi ) return {};
+        return std::to_string( HIWORD( ffi->dwProductVersionMS ) ) + "." + std::to_string( LOWORD( ffi->dwProductVersionMS ) ) + "."
+             + std::to_string( HIWORD( ffi->dwProductVersionLS ) ) + "." + std::to_string( LOWORD( ffi->dwProductVersionLS ) );
+#else
+        return {};
+#endif
+    }
+
+    // Folder that holds base.scs / def.scs, derived from the game executable
+    // this DLL is loaded into. Empty if it does not look like a game folder.
+    std::filesystem::path SpelMap()
+    {
+#ifdef _WIN32
+        wchar_t buf[ MAX_PATH ];
+        const DWORD n = GetModuleFileNameW( nullptr, buf, MAX_PATH );
+        if( n == 0 || n >= MAX_PATH ) return {};
+        std::filesystem::path exe( buf );
+        // <game>/bin/win_x64/eurotrucks2.exe
+        std::filesystem::path map = exe.parent_path().parent_path().parent_path();
+        std::error_code ec;
+        if( std::filesystem::exists( map / "base.scs", ec ) || std::filesystem::exists( map / "def.scs", ec ) ) return map;
+#endif
+        return {};
     }
 }
 
@@ -245,11 +388,11 @@ namespace
 // TruckersMP Client SDK entry points
 // ---------------------------------------------------------------------
 
-// Wordt aangeroepen door de Beschermd()-wrapper in CallbackHulp.hxx zodra
-// een callback een exceptie laat ontsnappen. Logt naar de clientlog, want
-// daar kijken gebruikers en het TMP-team toch al (aanbeveling uit de docs).
-// Valt stil terug als er (nog) geen sessie is -- bijvoorbeeld tijdens
-// afsluiten.
+// Called by the Beschermd() wrapper in CallbackHulp.hxx when a
+// callback lets an exception escape. Logs to the client log, because
+// that is where users and the TMP team already look (recommendation
+// from the docs). Falls back quietly when there is no session (yet)
+// -- for example during shutdown.
 namespace Ritten
 {
     void LogPluginFout( const std::string &bericht )
@@ -276,15 +419,15 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
         return false;
     }
 
-    // ALLEREERST: gegevens uit de oude map meeverhuizen. De plugin heette
-    // vroeger "Ritten Overlay" en bewaarde alles in %APPDATA%\RittenOverlay.
-    // Zonder deze stap zou iemand die bijwerkt zijn rittenlogboek, zijn
-    // tachograafstand en zijn instellingen "kwijt" zijn -- ze staan er nog,
-    // maar de plugin kijkt op de nieuwe plek.
+    // FIRST OF ALL: migrate data from the old folder. The plugin used to
+    // be called "Ritten Overlay" and kept everything in
+    // %APPDATA%\RittenOverlay. Without this step someone who updates
+    // would have "lost" his trip log, tachograph state and settings --
+    // they are still there, but the plugin looks in the new place.
     //
-    // Alleen kopieren, nooit verplaatsen of verwijderen: gaat er iets mis,
-    // dan staat het origineel er nog. En alleen als de nieuwe map nog leeg
-    // is, zodat dit precies een keer gebeurt.
+    // Only copy, never move or delete: if something goes wrong, the
+    // original is still there. And only while the new folder is still
+    // empty, so this happens exactly once.
     try
     {
         const char *appdata = std::getenv( "APPDATA" );
@@ -296,17 +439,16 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
             std::error_code ec;
             if( std::filesystem::exists( oud, ec ) )
             {
-                // PER BESTAND kijken, niet of de nieuwe MAP al bestaat.
-                // Gemeten 31-08: die map wordt al aangemaakt door een ander
-                // onderdeel voordat deze code aan de beurt is, waardoor de
-                // hele verhuizing werd overgeslagen en het leek alsof alles
-                // weg was.
+                // Check PER FILE, not whether the new FOLDER already exists.
+                // Measured 31-08: that folder is already created by another
+                // component before this code runs, so the whole migration was skipped
+                // and it looked as if everything was gone.
                 std::filesystem::create_directories( nieuw, ec );
 
                 for( const auto &item : std::filesystem::directory_iterator( oud, ec ) )
                 {
                     const std::filesystem::path doel = nieuw / item.path().filename();
-                    if( std::filesystem::exists( doel, ec ) ) continue; // niets overschrijven
+                    if( std::filesystem::exists( doel, ec ) ) continue;  // overwrite nothing
 
                     if( item.is_directory( ec ) )
                     {
@@ -321,9 +463,9 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
                     }
                 }
 
-                // Het logo heette vroeger naar het bedrijf van de bouwer;
-                // nu heet het gewoon logo.png. Even meenemen, anders staat
-                // er "geen logo" terwijl het bestand er wel is.
+                // The logo used to be named after the builder's company; now it is
+                // simply logo.png. Take it along, otherwise it says "no logo" while
+                // the file is there.
                 const std::filesystem::path oudLogo = nieuw / "weeda-logo.png";
                 const std::filesystem::path nieuwLogo = nieuw / "logo.png";
                 if( std::filesystem::exists( oudLogo, ec ) &&
@@ -343,17 +485,16 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
     g_discord = std::make_unique<Ritten::DiscordWebhook>();
     g_incidentRecorder = std::make_unique<Ritten::IncidentRecorder>();
 
-    // Elke keer dat een rit wordt afgerond/geannuleerd, ook een Discord-
-    // melding proberen te sturen (DiscordWebhook checkt zelf of dat aan
-    // staat en of er een URL is ingesteld -- hier hoeven we daar niet op te
-    // letten).
+    // Every time a trip is completed/cancelled, also try to send a
+    // Discord message (DiscordWebhook checks itself whether that is on
+    // and whether a URL is set -- we do not need to care here).
     g_logger->ZetVoltooidCallback( []( const Ritten::Trip &trip ) { g_discord->StuurRitVoltooid( trip ); } );
 
-    // EERST het logboek leegmaken, DAARNA pas de onderdelen aanmaken.
-    // Andersom werd alles wat een constructor logde meteen weer gewist --
-    // gemeten 31-08: de regel "afstandsfactor uit vorige sessie" verscheen
-    // nooit, terwijl het inlezen wel degelijk gebeurde.
-    Ritten::Logboek::StartNieuweSessie( "CabNavi gestart" );
+    // FIRST empty the log, THEN create the components. The other way
+    // round, everything a constructor logged was wiped right away --
+    // measured 31-08: the line "afstandsfactor uit vorige sessie" never
+    // appeared, while the reading did happen.
+    Ritten::Logboek::StartNieuweSessie( "CabNavi started" );
     {
         std::error_code ec;
         if( const char *ad = std::getenv( "APPDATA" ) )
@@ -362,8 +503,8 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
             if( std::filesystem::exists( oudePad, ec ) )
             {
                 Ritten::Logboek::Schrijf( "start",
-                    "oude map RittenOverlay gevonden -- gegevens zijn gekopieerd naar CabNavi. "
-                    "De oude map blijft staan en mag je zelf weggooien." );
+                    "old folder RittenOverlay found -- data has been copied to CabNavi. "
+                    "The old folder is left in place; you may delete it yourself." );
             }
         }
     }
@@ -374,7 +515,7 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
     g_spelers = std::make_unique<Ritten::PlayersNearby>( *g_session );
     g_vrachtTracking->ZetIncidentKoppeling( g_spelers.get(), g_incidentRecorder.get() );
 
-    Ritten::Logboek::Schrijf( "start", "plugin geladen, sessie opgezet" );
+    Ritten::Logboek::Schrijf( "start", "plugin loaded, session set up" );
 
     g_session->Core().LogMessage( TruckersMP::LogLevel::Info, "CabNavi geladen." );
 
@@ -391,23 +532,27 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
 
 TMP_EXPORT void TMP_API truckersmp_shutdown( void )
 {
-    Ritten::Logboek::Schrijf( "gebeurt", "plugin wordt afgesloten" );
+    Ritten::Logboek::Schrijf( "event", "plugin shutting down" );
     ZetMuisVoorOverlay( false );
     if( g_overlay ) g_overlay->Shutdown();
     g_overlay.reset();
-    g_spelers.reset();
+    // Order matters: TruckTracking holds RAW pointers to PlayersNearby
+    // and IncidentRecorder (see ZetIncidentKoppeling) and uses them in
+    // SchadeCallback. Those two must go AFTER TruckTracking, not before
+    // -- otherwise an incoming damage update can read freed memory.
     g_vrachtTracking.reset();
+    g_spelers.reset();
     g_busTracking.reset();
     g_discord.reset();
     g_incidentRecorder.reset();
     g_brandstof.reset();
     g_logger.reset();
-    g_session.reset(); // ontkoppelt automatisch alle geregistreerde events
+    g_session.reset();  // automatically detaches all registered events
 }
 
 // ---------------------------------------------------------------------
-// SCS Telemetry SDK entry points (voor reguliere vrachtjobs; zie
-// TruckTracking.hxx voor waarom dit apart van de TruckersMP SDK loopt)
+// SCS Telemetry SDK entry points (for regular cargo jobs; see
+// TruckTracking.hxx for why this runs separately from the TruckersMP SDK)
 // ---------------------------------------------------------------------
 
 SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_init_params_t *params )
@@ -420,9 +565,9 @@ SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_i
 
     if( !g_vrachtTracking )
     {
-        // Kan gebeuren als scs_telemetry_init voor truckersmp_init draait
-        // (zie de "hoofdbestand deelt globals" opmerking in de how-to);
-        // maak alvast een logger + tracker aan zodat er niets verloren gaat.
+        // Can happen when scs_telemetry_init runs before truckersmp_init (see
+        // the "main file shares globals" note in the how-to); create a logger
+        // + tracker already so nothing is lost.
         g_logger = std::make_unique<Ritten::TripLogger>();
         g_brandstof = std::make_unique<Ritten::FuelCosts>();
         g_vrachtTracking = std::make_unique<Ritten::TruckTracking>( *g_logger, *g_brandstof );
@@ -430,11 +575,58 @@ SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_i
 
     g_vrachtTracking->RegistreerBijTelemetrie( p );
 
-    // Bevestiging in het SPEL-logbestand (niet debug.log) dat de SCS
-    // Telemetry-kant van de plugin daadwerkelijk is opgestart. Als je deze
-    // regel niet ziet in client.log, wordt scs_telemetry_init helemaal
-    // niet aangeroepen door het spel -- dan zit het probleem dus niet in de
-    // job-herkenning zelf, maar al bij het laden van dit deel van de plugin.
+    // Fuel prices straight from the game files. We run INSIDE the game
+    // process, so the executable's own path tells us where the game is:
+    // <game>\bin\win_x64\eurotrucks2.exe -> three levels up. No registry,
+    // no guessing about Steam library folders. Cache key = game version plus
+    // the size and date of def.scs, so a patch that touches the data is
+    // picked up and an unchanged game costs nothing after the first read.
+    {
+        const std::filesystem::path spelmap = Ritten::SpelMap();
+        if( spelmap.empty() )
+        {
+            Ritten::Logboek::Schrijf( "event", "fuel prices: game folder not found next to the executable, keeping file" );
+        }
+        else
+        {
+            std::string sleutel = std::string( p->common.game_id ? p->common.game_id : "game" ) + " " + Ritten::SpelVersie();
+            std::error_code ec;
+            const auto def = spelmap / "def.scs";
+            if( std::filesystem::exists( def, ec ) )
+            {
+                sleutel += "|" + std::to_string( std::filesystem::file_size( def, ec ) ) + "|"
+                           + std::to_string( std::filesystem::last_write_time( def, ec ).time_since_epoch().count() );
+            }
+            g_brandstof->StartSpelPrijzen( spelmap, sleutel );
+
+            // The embedded city table is a snapshot of one map version. Prices
+            // and country centres follow the game automatically; city positions
+            // cannot (they live in the map data). So say it when the game has
+            // moved on, and the table should be regenerated
+            // (tools/kaartdata/maak_tabel.py).
+            const std::string spelVersie = Ritten::SpelVersie();   // "1.60.1.7", from the exe
+            const std::string kaart = Ritten::Kaartdata::Versie();
+            if( spelVersie.empty() )
+            {
+                Ritten::Logboek::Schrijf( "start", "map table " + kaart + "; game version unreadable" );
+            }
+            else if( Ritten::Kaartdata::VersieNieuwer( spelVersie, kaart ) )
+            {
+                Ritten::Logboek::Schrijf( "event", "map table is from game " + kaart + ", running " + spelVersie
+                                          + ": cities of a newer map DLC fall back to country centres until the table is regenerated" );
+            }
+            else
+            {
+                Ritten::Logboek::Schrijf( "start", "map table " + kaart + " matches game " + spelVersie + " (" + std::to_string( Ritten::Kaartdata::AantalSteden() ) + " cities)" );
+            }
+        }
+    }
+
+    // Confirmation in the GAME log file (not debug.log) that the SCS
+    // Telemetry side of the plugin actually started. If you do not see
+    // this line in client.log, scs_telemetry_init is not called by the
+    // game at all -- then the problem is not in the job detection itself,
+    // but already in loading this part of the plugin.
     p->common.log( SCS_LOG_TYPE_message, "CabNavi: SCS telemetry geinitialiseerd, kanalen geregistreerd." );
 
     return SCS_RESULT_ok;
@@ -442,5 +634,5 @@ SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_i
 
 SCSAPI_VOID scs_telemetry_shutdown( void )
 {
-    // Kanalen/events worden automatisch losgekoppeld door de host.
+    // Channels/events are detached automatically by the host.
 }

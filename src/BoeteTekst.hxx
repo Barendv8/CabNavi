@@ -1,17 +1,17 @@
 #pragma once
 // BoeteTekst.hxx
 //
-// Het spel meldt de reden van een boete als korte Engelse code in het
-// "fine.offence"-attribuut van het player.fined-gameplay-event. Deze tabel
-// vertaalt die naar Nederlands.
+// The game reports the reason for a fine as a short English code in the
+// "fine.offence" attribute of the player.fined gameplay event. This table
+// translates it to Dutch.
 //
-// Staat apart omdat zowel de overlay (Live-tab) als de Discord-webhook 'm
-// nodig heeft; eerder stond hij alleen in Overlay.cxx en kon de webhook er
-// niet bij.
+// Kept separate because both the overlay (Live tab) and the Discord
+// webhook need it; it used to live only in Overlay.cxx where the webhook
+// could not reach it.
 //
-// Onbekende codes worden RUW teruggegeven in plaats van vertaald naar iets
-// vaags als "overtreding": een code die je zelf kunt opzoeken is nuttiger
-// dan een verzonnen omschrijving.
+// Unknown codes are returned RAW instead of translated to something vague
+// like "offence": a code you can look up yourself is more useful than an
+// invented description.
 
 #include <string>
 

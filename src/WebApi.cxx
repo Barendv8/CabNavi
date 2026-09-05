@@ -21,33 +21,32 @@ namespace Ritten
 {
     namespace
     {
-        // Hoe vaak we opnieuw vragen. Serverstatus verandert langzaam,
-        // evenementen nog langzamer -- dus geen reden om te haasten.
+        // How often we ask again. Server status changes slowly, events even
+        // more slowly -- so no reason to hurry.
         constexpr int SERVERS_ELKE_SECONDEN = 60;
         constexpr int EVENEMENTEN_ELKE_SECONDEN = 15 * 60;
-        // VTC-gegevens veranderen nog minder vaak dan evenementen: een naam
-        // of ledenaantal blijft dagen hetzelfde. Elk kwartier is ruim zat.
+        // VTC data changes even less often than events: a name or member
+        // count stays the same for days. Every quarter hour is plenty.
         constexpr int VTC_ELKE_SECONDEN = 15 * 60;
-        // Hoeveel spelers we per seconde opzoeken. Er staat geen limiet
-        // gedocumenteerd, dus dit blijft behoudend -- maar bij 74 spelers in
-        // bereik duurde twee per seconde bijna veertig seconden voordat de
-        // laatste aan de beurt was, en dan lijkt het alsof het niet werkt.
+        // How many players we look up per second. No limit is documented, so
+        // this stays conservative -- but with 74 players in range, two per
+        // second took almost forty seconds before the last one had its turn,
+        // and then it looks as if it does not work.
         constexpr int OPZOEKINGEN_PER_SECONDE = 1;
-        // Hoe lang we niets vragen na een mislukking.
+        // How long we ask nothing after a failure.
         constexpr int RUST_NA_FOUT_SECONDEN = 10;
-        // Na een echte 429 een stuk langer wachten. Doorduwen maakt het
-        // alleen erger en blokkeert ook de gewone VTC-gegevens.
+        // After a real 429 wait a lot longer. Pushing on only makes it worse
+        // and blocks the normal VTC data too.
         constexpr int RUST_NA_429_SECONDEN = 60;
 
-        // Ja/nee-waarde uitlezen die ook TEKST of een GETAL mag zijn.
+        // Read a yes/no value that may also be TEXT or a NUMBER.
         //
-        // Nodig omdat de API zich niet aan zijn eigen documentatie houdt: het
-        // schema zegt dat "error" een boolean is, maar de server stuurt de
-        // TEKST "false". Dat gooide een type-fout en daardoor kwam de hele
-        // serverlijst niet door.
+        // Needed because the API does not follow its own documentation: the
+        // schema says "error" is a boolean, but the server sends the TEXT
+        // "false". That threw a type error and the whole server list failed.
         //
-        // Zo'n verschil kan bij elk veld opduiken, dus lezen we alle ja/nee-
-        // velden voortaan op deze manier: liever soepel dan stuk.
+        // Such a mismatch can pop up in any field, so from now on all yes/no
+        // fields are read this way: rather lenient than broken.
         bool LeesJaNee( const json &object, const char *sleutel, bool standaard )
         {
             if( !object.contains( sleutel ) ) return standaard;
@@ -62,7 +61,7 @@ namespace Ritten
             return standaard;
         }
 
-        // Zelfde gedachte voor getallen: accepteer ook een getal in tekstvorm.
+        // Same idea for numbers: accept a number in text form too.
         int LeesGetal( const json &object, const char *sleutel, int standaard )
         {
             if( !object.contains( sleutel ) ) return standaard;
@@ -76,7 +75,7 @@ namespace Ritten
             return standaard;
         }
 
-        // En voor tekst: een getal of null mag ook, dan maken we er tekst van.
+        // And for text: a number or null is fine too, then we make text of it.
         std::string LeesTekst( const json &object, const char *sleutel )
         {
             if( !object.contains( sleutel ) ) return {};
@@ -98,8 +97,8 @@ namespace Ritten
 
     WebApi::WebApi()
     {
-        // Wat we vorige keer al opgezocht hebben meteen terughalen, zodat je
-        // na een herstart niet opnieuw begint.
+        // Restore what we looked up last time right away, so you do not
+        // start over after a restart.
         LaadSpelerCache();
     }
 
@@ -109,15 +108,15 @@ namespace Ritten
         if( m_thread.joinable() ) m_thread.join();
     }
 
-    // De werkthread moet draaien zodra ER IETS aan staat -- serverstatus OF
-    // de VTC-kant. Stond dit alleen in ZetIngeschakeld, dan bleef de VTC
-    // eeuwig op "wordt opgehaald" staan als je de serverstatus uit had.
+    // The worker thread must run as soon as ANYTHING is on -- server
+    // status OR the VTC side. When this was only in ZetIngeschakeld, the
+    // VTC stayed on "fetching" forever if you had server status off.
     void WebApi::StartDraadIndienNodig()
     {
         if( m_thread.joinable() ) return;
         m_stoppen = false;
         m_thread = std::thread( [ this ] { WerkLus(); } );
-        Logboek::Schrijf( "gebeurt", "Web API-thread gestart" );
+        Logboek::Schrijf( "event", "Web API thread started" );
     }
 
     void WebApi::ZetIngeschakeld( bool aan )
@@ -126,11 +125,11 @@ namespace Ritten
         if( aan )
         {
             StartDraadIndienNodig();
-            Logboek::Schrijf( "gebeurt", "Web API ingeschakeld" );
+            Logboek::Schrijf( "event", "Web API enabled" );
         }
         else
         {
-            Logboek::Schrijf( "gebeurt", "Web API uitgeschakeld" );
+            Logboek::Schrijf( "event", "Web API disabled" );
         }
     }
 
@@ -161,8 +160,8 @@ namespace Ritten
 
         if( veranderd )
         {
-            // Meteen opnieuw ophalen in plaats van tot het volgende kwartier
-            // wachten -- anders lijkt het alsof je instelling niets doet.
+            // Fetch again immediately instead of waiting until the next quarter
+            // hour -- otherwise your setting seems to do nothing.
             m_vtcNuOphalen = true;
             std::lock_guard<std::mutex> slot( m_slot );
             m_vtcStatus = aan ? "wordt opgehaald..." : "uit";
@@ -201,9 +200,9 @@ namespace Ritten
 
     void WebApi::WerkLus()
     {
-        // Meteen bij het aanzetten een keer ophalen, daarna op het ritme
-        // hierboven. De tellers staan expres op nul zodat de eerste ronde
-        // direct gebeurt.
+        // Fetch once immediately when switched on, then at the rhythm above.
+        // The counters are deliberately zero so the first round happens
+        // right away.
         int secondenSindsServers = SERVERS_ELKE_SECONDEN;
         int secondenSindsEvenementen = EVENEMENTEN_ELKE_SECONDEN;
         int secondenSindsVtc = VTC_ELKE_SECONDEN;
@@ -226,9 +225,9 @@ namespace Ritten
                 }
             }
 
-            // VTC staat los van de rest: je kunt de serverstatus uit hebben
-            // en toch je eigen bedrijf volgen, of andersom. Zelfde rustige
-            // ritme als de evenementen -- dit is geen telemetrie.
+            // VTC is separate from the rest: you can have server status off and
+            // still follow your own company, or the other way round. Same easy
+            // rhythm as the events -- this is not telemetry.
             const int vtcId = m_vtcId.load();
             if( m_vtcAan && vtcId > 0 && m_rustSeconden <= 0 )
             {
@@ -243,16 +242,15 @@ namespace Ritten
                     }
                     else
                     {
-                        // Anders blijft er "wordt opgehaald" staan zonder dat
-                        // je weet waarom. HaalOp heeft m_status al gevuld met
-                        // de reden; die laten we hier ook zien.
+                        // Otherwise "fetching" stays there without you knowing why. HaalOp
+                        // has already filled m_status with the reason; we show it here too.
                         std::lock_guard<std::mutex> slot( m_slot );
                         m_vtcStatus = m_status;
                     }
                     if( HaalOp( basis + "/events", antwoord ) ) VerwerkVtcEvenementen( antwoord );
                     if( HaalOp( basis + "/news", antwoord ) ) VerwerkVtcNieuws( antwoord );
 
-                    // Waar je VTC zich voor heeft aangemeld.
+                    // What your VTC signed up for.
                     if( HaalOp( basis + "/events/attending", antwoord ) )
                     {
                         VerwerkAangemeld( antwoord, true );
@@ -261,11 +259,11 @@ namespace Ritten
                 }
             }
 
-            // Wachtrij met speler-opzoekingen afwerken: hooguit een paar per
-            // seconde. Bij vijftig spelers in beeld is iedereen dan binnen
-            // een halve minuut bekend, zonder de API te bestoken. Wat nog
-            // niet opgezocht is valt zolang terug op de tag, dus je ziet
-            // meteen iets en het wordt vanzelf preciezer.
+            // Work through the queue of player lookups: at most a few per
+            // second. With fifty players in view everyone is known within half a
+            // minute, without hammering the API. What is not looked up yet falls
+            // back to the tag meanwhile, so you see something right away and it
+            // gets more precise by itself.
             if( m_vtcAan && m_rustSeconden <= 0 )
             {
                 for( int n = 0; n < OPZOEKINGEN_PER_SECONDE; ++n )
@@ -276,7 +274,7 @@ namespace Ritten
                         if( m_wachtrij.empty() ) break;
                         id = m_wachtrij.front();
                         m_wachtrij.pop_front();
-                        m_bezig.insert( id ); // zolang niet opnieuw aanmelden
+                        m_bezig.insert( id );  // do not re-enqueue meanwhile
                     }
 
                     std::string antwoord;
@@ -291,9 +289,8 @@ namespace Ritten
                         m_bezig.erase( id );
                         if( !gelukt )
                         {
-                            // Achteraan terug in de rij, en even helemaal
-                            // stoppen. Meteen opnieuw proberen maakt het
-                            // alleen erger als er een limiet in het spel is.
+                            // Back to the end of the queue, and stop completely for a while.
+                            // Retrying immediately only makes it worse if a limit is in play.
                             m_wachtrij.push_back( id );
                             m_rustSeconden = RUST_NA_FOUT_SECONDEN;
                         }
@@ -301,21 +298,20 @@ namespace Ritten
 
                     if( !gelukt )
                     {
-                        Logboek::Schrijf( "vtc", "opzoeken mislukt voor speler "
+                        Logboek::Schrijf( "vtc", "lookup failed for player "
                                                      + std::to_string( id )
-                                                     + " -- even pauze" );
+                                                     + " -- pausing briefly" );
                         break;
                     }
                     if( m_stoppen ) break;
                 }
-                SlaSpelerCacheOp(); // schrijft alleen als er iets veranderd is
+                SlaSpelerCacheOp();  // only writes when something changed
             }
 
-            // Rustteller loopt altijd af, ongeacht wat er verder gebeurt.
+            // Rest counter always counts down, whatever else happens.
             if( m_rustSeconden > 0 ) --m_rustSeconden;
 
-            // In stapjes van een seconde wachten, zodat afsluiten niet een
-            // minuut hoeft te duren.
+            // Wait in one-second steps, so shutting down does not take a minute.
             std::this_thread::sleep_for( std::chrono::seconds( 1 ) );
             ++secondenSindsServers;
             ++secondenSindsEvenementen;
@@ -358,18 +354,17 @@ namespace Ritten
 
             if( status == 429 )
             {
-                // "Te veel verzoeken". GEMETEN 30-08: dit gebeurde echt, en
-                // niet alleen bij het opzoeken van spelers -- ook het gewone
-                // VTC-ophalen kreeg een 429 omdat het budget al op was.
-                // Daarom een LANGE pauze voor alles wat deze klasse doet,
-                // niet alleen voor de opzoekingen.
+                // "Too many requests". MEASURED 30-08: this really happened, and not
+                // only when looking up players -- the normal VTC fetch also got a 429
+                // because the budget was already spent. Hence a LONG pause for
+                // everything this class does, not just the lookups.
                 m_rustSeconden = RUST_NA_429_SECONDEN;
-                Logboek::Schrijf( "vtc", "statuscode 429 -- een minuut niets vragen" );
+                Logboek::Schrijf( "vtc", "status code 429 -- asking nothing for a minute" );
             }
 
             if( status == 200 )
             {
-                // In brokken lezen: het antwoord kan tientallen kilobytes zijn.
+                // Read in chunks: the answer can be tens of kilobytes.
                 std::string body;
                 DWORD beschikbaar = 0;
                 do
@@ -384,7 +379,11 @@ namespace Ritten
                     body.append( blok.data(), gelezen );
                 } while( beschikbaar > 0 );
 
-                Logboek::Schrijf( "gebeurt", pad + " -> " + std::to_string( body.size() ) + " bytes" );
+                // Category "vtc" and not "event": the path contains a TruckersMP
+                // ID (/v2/player/1234567), and "event" always ends up in debug.log
+                // -- even without the diagnostics box ticked. Now only when you log
+                // verbosely yourself.
+                Logboek::Schrijf( "vtc", pad + " -> " + std::to_string( body.size() ) + " bytes" );
                 antwoordUit = std::move( body );
                 gelukt = true;
             }
@@ -410,7 +409,7 @@ namespace Ritten
     {
         if( tekst.empty() )
         {
-            Logboek::Schrijf( "FOUT", "serverlijst: leeg antwoord ontvangen" );
+            Logboek::Schrijf( "ERROR", "server list: empty answer received" );
             std::lock_guard<std::mutex> slot( m_slot );
             m_status = "leeg antwoord";
             return;
@@ -443,13 +442,13 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            // Ook de EERSTE 200 TEKENS meeloggen. Zonder dat weet je alleen
-            // dat het misging, niet wat er binnenkwam -- en dan blijft het
-            // gissen. Vaak is het een foutpagina in plaats van JSON.
-            Logboek::Schrijf( "FOUT", std::string( "serverlijst niet te lezen: " ) + ex.what()
-                                          + " | begin antwoord: " + tekst.substr( 0, 200 ) );
+            // Also log the FIRST 200 CHARACTERS. Without that you only know it
+            // failed, not what came in -- and then it stays guesswork. Often it
+            // is an error page instead of JSON.
+            Logboek::Schrijf( "ERROR", std::string( "server list not readable: " ) + Logboek::KorteFout( ex.what() )
+                                          + " | start of answer: " + tekst.substr( 0, 200 ) );
             std::lock_guard<std::mutex> slot( m_slot );
-            m_status = std::string( "antwoord niet te lezen (" ) + ex.what() + ")";
+            m_status = std::string( "antwoord niet te lezen (" ) + Logboek::KorteFout( ex.what() ) + ")";
         }
     }
 
@@ -464,7 +463,7 @@ namespace Ritten
             std::vector<EvenementInfo> nieuw;
             const auto &respons = j[ "response" ];
 
-            // De API levert drie groepen; alleen wat nog komt is interessant.
+            // The API delivers three groups; only what is still to come matters.
             for( const char *groep : { "featured", "today", "upcoming" } )
             {
                 if( !respons.contains( groep ) ) continue;
@@ -489,7 +488,7 @@ namespace Ritten
                     }
                     nieuw.push_back( std::move( e ) );
 
-                    // Meer dan een handvol heeft geen zin op een HUD.
+                    // More than a handful makes no sense on a HUD.
                     if( nieuw.size() >= 8 ) break;
                 }
                 if( nieuw.size() >= 8 ) break;
@@ -500,8 +499,8 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "evenementen niet te lezen: " ) + ex.what()
-                                          + " | begin antwoord: " + tekst.substr( 0, 200 ) );
+            Logboek::Schrijf( "ERROR", std::string( "events not readable: " ) + Logboek::KorteFout( ex.what() )
+                                          + " | start of answer: " + tekst.substr( 0, 200 ) );
         }
     }
 
@@ -536,15 +535,15 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "VTC niet te lezen: " ) + ex.what()
-                                          + " | begin antwoord: " + tekst.substr( 0, 200 ) );
+            Logboek::Schrijf( "ERROR", std::string( "VTC not readable: " ) + Logboek::KorteFout( ex.what() )
+                                          + " | start of answer: " + tekst.substr( 0, 200 ) );
         }
     }
 
     namespace
     {
-        // Huidige tijd in dezelfde vorm als de API hem geeft. In die vorm is
-        // een tekstvergelijking ook een datumvergelijking.
+        // Current time in the same form as the API gives it. In that form a
+        // text comparison is also a date comparison.
         std::string NuUtcTekst()
         {
             const std::time_t nu = std::time( nullptr );
@@ -561,7 +560,7 @@ namespace Ritten
             return buf;
         }
 
-        // Eén evenement uit de JSON halen; de vorm is overal dezelfde.
+        // Extract one event from the JSON; the shape is the same everywhere.
         EvenementInfo LeesEvenement( const json &item )
         {
             EvenementInfo e;
@@ -584,10 +583,10 @@ namespace Ritten
         m_eigenAccount = accountId;
     }
 
-    // Alleen nog de VTC-kant. Jouw eigen convooien vink je zelf aan en
-    // worden lokaal bewaard, want de API geeft ze niet: /events/user/{id}
-    // levert wat je zelf hebt AANGEMAAKT, niet waar je je voor opgaf
-    // (gemeten 30-08: leeg antwoord terwijl er wel aanmeldingen waren).
+    // Only the VTC side remains. Your own convoys you tick yourself and
+    // they are stored locally, because the API does not give them:
+    // /events/user/{id} returns what you CREATED, not what you signed up
+    // for (measured 30-08: empty answer while there were sign-ups).
     std::vector<EvenementInfo> WebApi::AangemeldeEvenementen() const
     {
         std::lock_guard<std::mutex> slot( m_slot );
@@ -613,13 +612,13 @@ namespace Ritten
             for( const auto &item : j[ "response" ] )
             {
                 EvenementInfo e = LeesEvenement( item );
-                if( !e.startTijd.empty() && e.startTijd < nuUtc ) continue; // al geweest
+                if( !e.startTijd.empty() && e.startTijd < nuUtc ) continue;  // already past
                 nieuw.push_back( std::move( e ) );
                 if( nieuw.size() >= 20 ) break;
             }
 
-            Logboek::Schrijf( "vtc", std::string( viaVtc ? "VTC meldt zich aan voor " : "jij aangemeld voor " )
-                                          + std::to_string( nieuw.size() ) + " convooi(en)" );
+            Logboek::Schrijf( "vtc", std::string( viaVtc ? "VTC signed up for " : "you signed up for " )
+                                          + std::to_string( nieuw.size() ) + " convoy(s)" );
 
             std::lock_guard<std::mutex> slot( m_slot );
             m_aangemeldVtc = std::move( nieuw );
@@ -627,7 +626,7 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "aanmeldingen niet te lezen: " ) + ex.what() );
+            Logboek::Schrijf( "ERROR", std::string( "sign-ups not readable: " ) + Logboek::KorteFout( ex.what() ) );
         }
     }
 
@@ -639,20 +638,20 @@ namespace Ritten
             if( LeesJaNee( j, "error", true ) ) return;
             if( !j.contains( "response" ) ) return;
 
-            // Hier is "response" rechtstreeks een lijst, anders dan bij de
-            // algemene evenementen (die drie groepen heeft).
+            // Here "response" is directly a list, unlike the general events
+            // (which have three groups).
             const auto &respons = j[ "response" ];
             if( !respons.is_array() ) return;
 
-            // Alleen wat NOG KOMT. Dit endpoint geeft alles wat een VTC ooit
-            // georganiseerd heeft; de eerste acht daarvan zijn dus de OUDSTE
-            // (gezien: convooien uit 2019 en 2021 in beeld). De API kent geen
-            // filter, dus we vergelijken zelf met de klok van nu.
+            // Only what is STILL TO COME. This endpoint returns everything a VTC
+            // ever organised; the first eight are therefore the OLDEST (seen:
+            // convoys from 2019 and 2021 in view). The API has no filter, so we
+            // compare with the current clock ourselves.
             //
-            // De tijd komt als "2026-09-05 17:00:00" binnen, en in die vorm
-            // is een gewone tekstvergelijking ook een datumvergelijking --
-            // jaar staat vooraan, dan maand, dan dag. Geen datum-ontleding
-            // nodig, en dus ook niets dat stuk kan op een rare notatie.
+            // The time arrives as "2026-09-05 17:00:00", and in that form a
+            // plain text comparison is also a date comparison -- year first,
+            // then month, then day. No date parsing needed, so nothing can break
+            // on an odd notation either.
             std::string nuUtc;
             {
                 const std::time_t nu = std::time( nullptr );
@@ -677,8 +676,8 @@ namespace Ritten
             e.naam = LeesTekst( item, "name" );
                 e.startTijd = LeesTekst( item, "start_at" );
 
-                // Al geweest? Overslaan. Een lege tijd laten we staan -- dan
-                // weten we het niet, en is weglaten erger dan tonen.
+                // Already past? Skip. An empty time we leave in -- then we do not
+                // know, and omitting is worse than showing.
                 if( !e.startTijd.empty() && e.startTijd < nuUtc ) continue;
 
                 e.spel = LeesTekst( item, "game" );
@@ -695,10 +694,10 @@ namespace Ritten
                     e.server = LeesTekst( item[ "server" ], "name" );
                 }
                 nieuw.push_back( std::move( e ) );
-                if( nieuw.size() >= 60 ) break; // bovengrens tegen eindeloze lijsten
+                if( nieuw.size() >= 60 ) break;  // upper bound against endless lists
             }
 
-            // Eerstvolgende bovenaan.
+            // Next one on top.
             std::sort( nieuw.begin(), nieuw.end(),
                         []( const EvenementInfo &a, const EvenementInfo &b )
                         { return a.startTijd < b.startTijd; } );
@@ -709,8 +708,8 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "VTC-evenementen niet te lezen: " ) + ex.what()
-                                          + " | begin antwoord: " + tekst.substr( 0, 200 ) );
+            Logboek::Schrijf( "ERROR", std::string( "VTC events not readable: " ) + Logboek::KorteFout( ex.what() )
+                                          + " | start of answer: " + tekst.substr( 0, 200 ) );
         }
     }
 
@@ -722,7 +721,7 @@ namespace Ritten
             if( LeesJaNee( j, "error", true ) ) return;
             if( !j.contains( "response" ) || !j[ "response" ].is_object() ) return;
 
-            // Hier zit de lijst nog een laagje dieper, in "news".
+            // Here the list sits one level deeper, in "news".
             const auto &respons = j[ "response" ];
             if( !respons.contains( "news" ) || !respons[ "news" ].is_array() ) return;
 
@@ -743,26 +742,26 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "VTC-nieuws niet te lezen: " ) + ex.what()
-                                          + " | begin antwoord: " + tekst.substr( 0, 200 ) );
+            Logboek::Schrijf( "ERROR", std::string( "VTC news not readable: " ) + Logboek::KorteFout( ex.what() )
+                                          + " | start of answer: " + tekst.substr( 0, 200 ) );
         }
     }
 
-    // --- VTC per speler --------------------------------------------------
+    // --- VTC per player --------------------------------------------------
     void WebApi::MeldSpelerAan( std::uint64_t accountId, bool voorrang )
     {
         if( accountId == 0 ) return;
         if( !m_vtcAan ) return;
 
         std::lock_guard<std::mutex> slot( m_slot );
-        // Al bekend? Dan niets doen. Al in de rij? Ook niets doen.
+        // Already known? Do nothing. Already queued? Also nothing.
         if( m_spelerVtc.find( accountId ) != m_spelerVtc.end() ) return;
         if( m_bezig.find( accountId ) != m_bezig.end() ) return;
         for( std::uint64_t id : m_wachtrij ) if( id == accountId ) return;
 
-        // Bovengrens op de rij: bij een druk evenement wil je niet dat er
-        // honderden opzoekingen blijven staan die je toch niet meer nodig
-        // hebt tegen de tijd dat ze aan de beurt zijn.
+        // Upper bound on the queue: at a busy event you do not want hundreds
+        // of lookups waiting that you no longer need by the time they come
+        // up.
         if( m_wachtrij.size() >= 200 ) return;
         if( voorrang ) m_wachtrij.push_front( accountId );
         else           m_wachtrij.push_back( accountId );
@@ -798,7 +797,7 @@ namespace Ritten
 
     void WebApi::VerwerkSpelerVtc( std::uint64_t accountId, const std::string &tekst )
     {
-        int vtcId = 0;      // 0 = zit niet bij een VTC; dat onthouden we ook
+        int vtcId = 0;  // 0 = not in a VTC; we remember that too
         bool patron = false;
         try
         {
@@ -812,8 +811,8 @@ namespace Ritten
                     const auto &v = r[ "vtc" ];
                     if( LeesJaNee( v, "inVTC", false ) ) vtcId = LeesGetal( v, "id", 0 );
                 }
-                // Patron uit dezelfde opvraging. "active" telt: iemand die
-                // ooit gedoneerd heeft maar nu niet meer, is geen patron.
+                // Patron from the same lookup. "active" counts: someone who once
+                // donated but no longer does is not a patron.
                 if( r.contains( "patreon" ) && r[ "patreon" ].is_object() )
                 {
                     const auto &p = r[ "patreon" ];
@@ -823,16 +822,16 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "FOUT", std::string( "speler-VTC niet te lezen: " ) + ex.what() );
-            return; // niet onthouden, dan proberen we het later nog eens
+            Logboek::Schrijf( "ERROR", std::string( "player VTC not readable: " ) + Logboek::KorteFout( ex.what() ) );
+            return;  // not remembered, so we try again later
         }
 
-        // In het logboek, zodat in een ritje terug te zien is WELKE spelers
-        // zijn opgezocht en welk VTC-nummer eruit kwam. Anders blijft het
-        // gissen of het opzoeken werkt of dat de vergelijking niet klopt.
-        Logboek::Schrijf( "vtc", "speler " + std::to_string( accountId )
+        // In the log, so afterwards you can see WHICH players were looked up
+        // and which VTC number came out. Otherwise it stays guesswork whether
+        // the lookup works or the comparison is off.
+        Logboek::Schrijf( "vtc", "player " + std::to_string( accountId )
                                      + " -> vtc " + std::to_string( vtcId )
-                                     + " patron " + ( patron ? "ja" : "nee" ) );
+                                     + " patron " + ( patron ? "yes" : "no" ) );
 
         std::lock_guard<std::mutex> slot( m_slot );
         SpelerGegevens g;
@@ -870,7 +869,7 @@ namespace Ritten
                 SpelerGegevens g;
                 if( it.value().is_number() )
                 {
-                    g.vtcId = it.value().get<int>(); // oud formaat: alleen het nummer
+                    g.vtcId = it.value().get<int>();  // old format: just the number
                 }
                 else if( it.value().is_object() )
                 {
@@ -883,7 +882,7 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "gebeurt", std::string( "spelers_vtc.json niet te lezen: " ) + ex.what() );
+            Logboek::Schrijf( "event", std::string( "spelers_vtc.json not readable: " ) + Logboek::KorteFout( ex.what() ) );
         }
     }
 
@@ -909,7 +908,7 @@ namespace Ritten
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "gebeurt", std::string( "spelers_vtc.json niet te schrijven: " ) + ex.what() );
+            Logboek::Schrijf( "event", std::string( "spelers_vtc.json not writable: " ) + Logboek::KorteFout( ex.what() ) );
         }
     }
 }

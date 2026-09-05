@@ -30,13 +30,9 @@ cost, and how you are doing over time.
 |---|---|---|
 | ![Players](docs/images/Players.png) | ![Trip log](docs/images/Triplog.png) | ![Statistics](docs/images/Statistic.png) |
 
-| VTC | VTC settings | Settings |
+| VTC settings | Settings | Settings (continued) |
 |---|---|---|
-| ![VTC](docs/images/Vtcdashbord.png) | ![VTC settings](docs/images/VTCsettings.png) | ![Settings](docs/images/Settings1.png) |
-
-| Settings (continued) |
-|---|
-| ![Settings](docs/images/Settings2.png) |
+| ![VTC settings](docs/images/VTCsettings.png) | ![Settings](docs/images/Settings1.png) | ![Settings](docs/images/Settings2.png) |
 
 ---
 
@@ -80,26 +76,28 @@ cost, and how you are doing over time.
 
 ## Installation
 
-1. Download the latest release from the [Releases](../../releases) page.
-2. Unpack the ZIP to a folder.
-3. Run **install.bat**. It locates your game, installs the plugin and puts
-   the icons and default logo in place. If it cannot find the game it will
-   ask you for the folder.
-4. Start the game through TruckersMP. Press **Insert** to show or hide the
+1. Download **CabNavi-x.y.z-setup.exe** from the [Releases](../../releases) page.
+2. Run it: Next, Next, Finish. Setup finds your game (Steam registry and all
+   library folders), installs the plugin into `<game>\bin\win_x64\plugins\`
+   and puts the icons and default logo in `%APPDATA%\CabNavi\`. Only if it
+   cannot find the game does it ask for the folder.
+3. Start the game through TruckersMP. Press **Insert** to show or hide the
    overlay, and **right click** to toggle the mouse.
 
-<details>
-<summary>Rather do it by hand?</summary>
+Uninstall via *Apps & features*; that removes the plugin and icons but keeps
+your trips and settings.
 
-| From the ZIP | Goes to |
+<details>
+<summary>Where the installer puts things</summary>
+
+| File | Goes to |
 |---|---|
 | `cabnavi.dll` | `<game folder>\bin\win_x64\plugins\` |
 | `icons` folder | `%APPDATA%\CabNavi\icons\` |
 | `logo.png` | `%APPDATA%\CabNavi\logo.png` |
 
-Create the `plugins` folder if it does not exist. Only the DLL is required:
-without the icons the overlay draws simple ones itself, and without a logo it
-just shows its name.
+Only the DLL is required: without the icons the overlay draws simple ones
+itself, and without a logo it just shows its name.
 
 </details>
 
@@ -147,7 +145,9 @@ Dear ImGui, nlohmann/json and stb_image are fetched automatically by CMake.
 **Configure and build**
 
 ```bat
-cmake -B build -A x64 -DTMP_SDK_DIR="C:\path\to\GameClientSDK\include" -DSCS_SDK_DIR="C:\path\to\scs_sdk\include"
+cmake -B build -A x64 ^
+      -DTMP_SDK_DIR="C:\path\to\GameClientSDK\include" ^
+      -DSCS_SDK_DIR="C:\path\to\scs_sdk\include"
 
 cmake --build build --config Release
 ```
@@ -180,17 +180,65 @@ CMakeLists.txt
 
 ## Data sources
 
-CabNavi combines two sources, both already present in your game:
+CabNavi combines sources that are all already on your PC, plus two small
+optional downloads:
 
 | What | Source |
 |---|---|
 | Speed, fuel, damage, odometer, cargo | SCS Telemetry SDK |
-| Nearby players, bus lines, rendering | TruckersMP Client SDK |
+| Nearby players, bus lines, rendering, position | TruckersMP Client SDK |
+| Dashboard trip counter per truck | your `game.sii` save file (read only) |
+| Fuel price per country, garage discount | the game's own `def.scs` / `base.scs` / `dlc_*.scs` (read only) |
+| City, fuel-station and garage positions | table built into the plugin, refreshed from this repository |
 | Server status, events, VTC data | TruckersMP Web API |
 
-The Web API is only contacted when you switch it on, and requests are
-deliberately kept slow and cached: this is community infrastructure, not
-ours.
+**Read only, always.** CabNavi opens your save and the game archives with
+read access only and never writes to them. There is not a single write call
+in those modules. Everything CabNavi stores goes to `%APPDATA%\CabNavi\`.
+
+**Network.** Two switches, both on by default and remembered:
+
+- *Server data and events* — the TruckersMP Web API, polled slowly (server
+  status once a minute, events every quarter hour) and cached.
+- *Update map data via internet* — fetches `data/kaartdata.json` from this
+  repository once per start. When a map DLC adds cities, the table is
+  regenerated here and every user has it at the next start, without a new
+  plugin version. Nothing about you is sent; it is a plain download.
+
+Switch either off under Statistics and CabNavi never contacts that host.
+
+### How fuel prices stay correct
+
+At startup CabNavi reads `fuel_price` per country and
+`fuel_discount_in_garage` from the game files of the version you actually
+run, cached per game version in `brandstofprijzen.json`. When you refuel,
+your position gives the nearest city, the city gives the country, the
+country gives the price; if the nearest pump is the one inside a large
+garage, the owner discount applies. SCS price changes, reworks and new
+country DLCs are picked up automatically.
+
+### Building the installer (maintainers)
+
+`installer/CabNavi.iss` is an [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+script. After `cmake --build build --config Release`, open the script in Inno
+Setup and press Compile; the wizard lands in `build/installer/`. Bump
+`AppVersion` at the top of the script for each release.
+
+### Updating the map table (maintainers)
+
+City positions live in the map data, which the plugin does not parse. When
+a map DLC adds cities:
+
+1. Run the [truckermudgeon/maps](https://github.com/truckermudgeon/maps)
+   parser once against your game folder (`npx tsx packages/clis/parser/index.ts -i "<ETS2 folder>" -o <out>`).
+2. `python tools/kaartdata/maak_tabel.py <out>` — writes
+   `src/KaartdataTabel.hxx` (for the next build) and `data/kaartdata.json`
+   (for the download).
+3. Commit both. Users with the download switch on get the new table at their
+   next start; the next release embeds it.
+
+Until then, a position in a region the table predates falls back to the
+country centres from the game files: coarser, but the right country.
 
 ---
 
@@ -201,7 +249,9 @@ These are not bugs; the data simply is not available:
 - **No live consumption channel.** The game does not export it, so
   consumption is derived from the fuel level over time. Every other HUD
   faces the same limit.
-- **No country channel.** Fuel prices per country are set by hand.
+- **No country channel.** The country is derived from your position and the
+  map table (see above); with the table off or outdated it falls back to
+  country centres or your manual choice.
 - **`game.next.rest.stop` no longer exists** in ETS2 1.60, so the mandatory
   break is counted by CabNavi itself.
 - **Your own event sign-ups cannot be read** from the Web API, so you tick
@@ -211,41 +261,8 @@ These are not bugs; the data simply is not available:
 
 ## Contributing
 
-Issues and pull requests are welcome. 
-The interface is available in both Dutch and English.
-
-## ⚖️ Legal disclaimer
-
-This project is an unofficial, community-made overlay and third-party tool.
-It is built on publicly available data from the **SCS Telemetry SDK**, the
-**TruckersMP Client SDK** and the **public TruckersMP Web API**.
-
-**No affiliation.** This project is not affiliated with, endorsed by,
-sponsored by, or connected in any way with SCS Software or TruckersMP.
-
-**Trademarks.** "Euro Truck Simulator 2", "SCS Software" and "TruckersMP",
-including all associated logos, names and images, are the exclusive property
-and trademarks of their respective owners. They are used here only to
-describe what this plugin works with.
-
-**No advantage.** CabNavi does not modify the game, does not change how you
-appear to other players, and gives no advantage in traffic or in jobs. It
-only shows information the game already provides to you.
-
-**Use at your own risk.** This software is provided "as is", without any
-warranty. It is meant for loyal ETS2 and TruckersMP players. If you tamper
-with the software yourself and that causes technical problems, or if you
-modify it and end up banned on TruckersMP, that is on you and not on the
-developer. Always follow the official TruckersMP rules, and drive by them
-too. See sections 15 and 16 of the GPL-3.0 for the full legal wording.
-
-**If something breaks.** Plugins run inside the game process. If the game
-starts behaving oddly, remove `cabnavi.dll` from the plugins folder and check
-whether the problem goes away before reporting it elsewhere.
-
-**Your data stays yours.** Nothing is uploaded anywhere. Network requests go
-to `api.truckersmp.com` only when you switch that on, and to a Discord
-webhook only if you configure one yourself.
+Issues and pull requests are welcome. The source comments are in Dutch; the
+interface is available in both Dutch and English.
 
 ## License
 

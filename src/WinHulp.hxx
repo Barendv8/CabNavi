@@ -1,11 +1,10 @@
 #pragma once
 // WinHulp.hxx
 //
-// Twee simpele Windows-standaardacties, gebruikt door het speler-
-// contextmenu: een URL openen in de standaardbrowser, en tekst naar het
-// klembord kopieren. Beide zijn gewone Win32 API's, geen TruckersMP/SCS
-// SDK-functies -- dus geen risico op verkeerd gegokte namen zoals eerder
-// bij de bus-/vracht-headers.
+// Two simple standard Windows actions, used by the player context menu:
+// open a URL in the default browser, and copy text to the clipboard. Both
+// are plain Win32 APIs, not TruckersMP/SCS SDK functions -- so no risk of
+// wrongly guessed names like earlier with the bus/cargo headers.
 
 #include <windows.h>
 #include <shellapi.h>
@@ -20,9 +19,9 @@ namespace Ritten
         ShellExecuteA( nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL );
     }
 
-    // Tekst UIT het klembord halen. Gebruikt door de plakknop naast het
-    // webhook-veld: handiger dan Ctrl+V wanneer je niet zeker weet of het
-    // spel die toetscombinatie doorlaat.
+    // Get text FROM the clipboard. Used by the paste button next to the
+    // webhook field: handier than Ctrl+V when you are not sure the game
+    // lets that key combination through.
     inline std::string LeesVanKlembord()
     {
         std::string uit;

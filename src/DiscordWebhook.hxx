@@ -1,18 +1,18 @@
 #pragma once
 // DiscordWebhook.hxx
 //
-// Stuurt een nette melding naar een Discord-webhook zodra een rit is
-// afgerond of geannuleerd. Gebruikt WinHTTP (ingebouwd in Windows, geen
-// extra afhankelijkheid nodig) om de POST-request te doen.
+// Sends a tidy notification to a Discord webhook when a trip is completed
+// or cancelled. Uses WinHTTP (built into Windows, no extra dependency) for
+// the POST request.
 //
-// Net als TripLogger: de daadwerkelijke netwerk-aanroep gebeurt op een
-// eigen achtergrond-thread met een wachtrij, nooit op de game-thread (zie
-// Threading in de SDK-docs -- callbacks mogen geen I/O doen).
+// Like TripLogger: the actual network call happens on its own background
+// thread with a queue, never on the game thread (see Threading in the SDK
+// docs -- callbacks must not do I/O).
 //
-// De webhook-URL en of het aan/uit staat worden bewaard in
-// %APPDATA%\CabNavi\discord.json (los van instellingen.json van
-// FuelCosts, om te voorkomen dat twee onafhankelijke onderdelen elkaars
-// instellingenbestand overschrijven).
+// The webhook URL and the on/off state are stored in
+// %APPDATA%\CabNavi\discord.json (separate from FuelCosts'
+// instellingen.json, so two independent components never overwrite each
+// other's settings file).
 
 #include "TripTypes.hxx"
 
@@ -32,16 +32,16 @@ namespace Ritten
         DiscordWebhook();
         ~DiscordWebhook();
 
-        // Veilig aan te roepen vanaf de game-thread: zet het bericht op de
-        // verstuur-queue en keert direct terug. Doet niets als er geen
-        // (geldige) webhook-URL is ingesteld of als het uit staat.
+        // Safe to call from the game thread: puts the message on the send
+        // queue and returns immediately. Does nothing if no (valid) webhook
+        // URL is set or if it is switched off.
         void StuurRitVoltooid( const Trip &trip );
 
-        // Handmatig een testbericht sturen (bv. via een knop in de
-        // overlay). Ook deze komt op de achtergrond-queue terecht.
+        // Send a test message manually (e.g. via a button in the overlay).
+        // This one also goes onto the background queue.
         void StuurTestbericht();
 
-        // Instellingen, direct opgeslagen naar disk bij wijziging.
+        // Settings, saved to disk immediately on change.
         void ZetWebhookUrl( const std::string &url );
         void ZetIngeschakeld( bool ingeschakeld );
         std::string WebhookUrl() const;

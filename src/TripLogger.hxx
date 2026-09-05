@@ -1,16 +1,16 @@
 #pragma once
 // TripLogger.hxx
 //
-// Schrijft elke afgeronde rit als één JSON-regel weg naar trips.jsonl
-// (in %APPDATA%/CabNavi/trips.jsonl), en houdt een in-memory
-// overzicht + totalen bij zodat de overlay direct statistieken kan tonen
-// zonder het hele bestand opnieuw te lezen.
+// Writes every completed trip as one JSON line to trips.jsonl
+// (in %APPDATA%/CabNavi/trips.jsonl), and keeps an in-memory overview +
+// totals so the overlay can show statistics immediately without re-reading
+// the whole file.
 //
-// Belangrijk (zie Threading in de SDK-docs): callbacks vanuit de SDK/
-// telemetry lopen op de game-thread en mogen geen I/O doen. Daarom heeft
-// TripLogger een eigen achtergrond-thread met een simpele queue: events
-// worden op de game-thread alleen op de queue gezet, en pas op de
-// achtergrond-thread daadwerkelijk weggeschreven.
+// Important (see Threading in the SDK docs): callbacks from the SDK/
+// telemetry run on the game thread and must not do I/O. That is why
+// TripLogger has its own background thread with a simple queue: events
+// are only put on the queue on the game thread, and actually written on
+// the background thread.
 
 #include "TripTypes.hxx"
 
@@ -33,9 +33,22 @@ namespace Ritten
         std::int64_t totaalInkomen = 0;
         double totaalBrandstofKostenEuro = 0.0;
 
-        // Liters EN kilometers van ritten waar allebei bekend is. Alleen
-        // die twee samen geven een eerlijk gemiddelde: een rit zonder
-        // brandstofgegevens zou anders het gemiddelde omlaag trekken.
+        // The other cost items. They were missing, so the NET on the
+        // statistics tab was only income minus fuel. MEASURED in a real
+        // trips.jsonl: 17,000 in fines fell completely out of view on an
+        // income of 54,055.
+        std::int64_t totaalBoeteKosten = 0;
+        std::int64_t totaalTolKosten = 0;
+        std::int64_t totaalVeerbootKosten = 0;
+        std::int64_t totaalTreinKosten = 0;
+
+        // Cancelled trips do NOT count in the figures above, but are kept
+        // separately -- otherwise it looks like they never happened.
+        int aantalGeannuleerd = 0;
+
+        // Litres AND kilometres of trips where both are known. Only those
+        // two together give an honest average: a trip without fuel data
+        // would otherwise pull the average down.
         double gemetenLiters = 0.0;
         double gemetenKm = 0.0;
     };
@@ -46,21 +59,20 @@ namespace Ritten
         TripLogger();
         ~TripLogger();
 
-        // Veilig aan te roepen vanaf de game-thread: zet het record op de
-        // schrijf-queue en keert direct terug.
+        // Safe to call from the game thread: puts the record on the write
+        // queue and returns immediately.
         void RegisterVoltooideRit( Trip trip );
 
-        // Wordt aangeroepen (op de game-thread, dus zelf ook non-blocking
-        // houden!) telkens als een rit is afgerond -- gebruikt door Plugin.cxx
-        // om DiscordWebhook te triggeren zonder dat de trackers zelf iets
-        // van Discord hoeven te weten.
+        // Called (on the game thread, so keep it non-blocking too!) whenever
+        // a trip is completed -- used by Plugin.cxx to trigger DiscordWebhook
+        // without the trackers having to know anything about Discord.
         void ZetVoltooidCallback( std::function<void( const Trip & )> callback ) { m_voltooidCallback = std::move( callback ); }
 
-        // Laadt de bestaande geschiedenis van disk (aangeroepen bij opstarten,
-        // niet op de game-thread nodig, mag blokkeren).
+        // Loads the existing history from disk (called at startup, not
+        // needed on the game thread, may block).
         void LaadGeschiedenis();
 
-        // Thread-safe snapshots voor de overlay.
+        // Thread-safe snapshots for the overlay.
         std::vector<Trip> GeefRecenteRitten( std::size_t maxAantal ) const;
         Totals GeefTotalen() const;
 
@@ -71,8 +83,12 @@ namespace Ritten
 
         std::filesystem::path m_bestandsPad;
 
+        // Add one trip to m_totalen. The caller must already hold
+        // m_dataMutex.
+        void TelMee( const Trip &t );
+
         mutable std::mutex m_dataMutex;
-        std::vector<Trip> m_geschiedenis; // meest recente laatst
+        std::vector<Trip> m_geschiedenis;  // most recent last
         Totals m_totalen;
         std::function<void( const Trip & )> m_voltooidCallback;
 

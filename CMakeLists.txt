@@ -86,6 +86,10 @@ add_library(cabnavi SHARED
     src/WebApi.cxx
     src/IncidentRecorder.cxx
     src/Overlay.cxx
+    src/SiiDecode.cxx
+    src/SaveLezer.cxx
+    src/ScsArchief.cxx
+    src/Kaartdata.cxx
     src/stb_image_impl.cxx
 
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -110,6 +114,7 @@ target_link_libraries(cabnavi PRIVATE
     d3d11
     dxgi
     winhttp
+    version
     shell32
     user32
 )

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,8 +34,8 @@ namespace Ritten
         return ss.str();
     }
 
-    // Helper: haal een attribuut op uit een scs_named_value_t-lijst op naam.
-    // Geeft nullptr terug als het niet gevonden is.
+    // Helper: fetch an attribute from a scs_named_value_t list by name.
+    // Returns nullptr if not found.
     static const scs_named_value_t *ZoekAttribuut( const scs_named_value_t *attributes, const char *naam )
     {
         for( const scs_named_value_t *attr = attributes; attr->name != nullptr; ++attr )
@@ -49,8 +50,8 @@ namespace Ritten
 
     namespace
     {
-        // %APPDATA%\CabNavi\tachograaf.json -- naast de andere
-        // instellingen, zodat een spel-update het niet opruimt.
+        // %APPDATA%\CabNavi\tachograaf.json -- next to the other settings,
+        // so a game update does not clean it up.
         std::filesystem::path TachoPad()
         {
             std::filesystem::path pad;
@@ -62,15 +63,15 @@ namespace Ritten
             return pad / "tachograaf.json";
         }
 
-        // De GEMETEN afstandsfactor onthouden tussen sessies. Zonder dit
-        // begint de plugin elke start op de standaardwaarde en klopt het
-        // stationaire l/uur pas nadat je een stuk gereden hebt -- gemeten
-        // 31-08: 1,0 na een verse start, 2,0 zodra de factor gemeten was,
-        // bij precies hetzelfde verbruik.
+        // Remember the MEASURED distance factor between sessions. Without this
+        // the plugin starts at the default every time and idle l/h is only
+        // right after you have driven a while -- measured 31-08: 1.0 after a
+        // fresh start, 2.0 once the factor was measured, at exactly the same
+        // consumption.
         //
-        // LET OP: dit verandert NIETS aan de berekening zelf. Het enige
-        // verschil is dat de startwaarde uit de vorige sessie komt in
-        // plaats van uit een aanname.
+        // NOTE: this changes NOTHING in the calculation itself. The only
+        // difference is that the start value comes from the previous session
+        // instead of from an assumption.
         std::filesystem::path MetingPad()
         {
             std::filesystem::path pad;
@@ -81,25 +82,32 @@ namespace Ritten
             std::filesystem::create_directories( pad, ec );
             return pad / "meting.txt";
         }
+
+        // Per-vehicle counter, next to meting.txt. Plain text, one line per
+        // vehicle: merk|model|kmStand|liters|km. No JSON library needed for
+        // five numbers.
+        std::filesystem::path VoertuigenPad()
+        {
+            return MetingPad().parent_path() / "voertuigen.txt";
+        }
     }
 
-    // De laatst gemeten afstandsfactor terughalen. Ontbreekt het bestand,
-    // dan blijft de standaardwaarde staan en gedraagt alles zich als
-    // voorheen.
+    // Restore the last measured distance factor. If the file is missing,
+    // the default stays and everything behaves as before.
     void TruckTracking::LaadMeting()
     {
-        // ALTIJD melden wat hier gebeurt, ook als er niets te lezen valt.
-        // Anders weet je bij een lege uitkomst niet of het bestand ontbrak,
-        // of dat de waarde is afgekeurd, of dat deze functie niet eens is
-        // aangeroepen -- en dan zit je te gissen (gemeten 31-08).
+        // ALWAYS report what happens here, even if there is nothing to read.
+        // Otherwise, on an empty result, you cannot tell whether the file was
+        // missing, the value was rejected, or this function was not even
+        // called -- and then you are guessing (measured 31-08).
         try
         {
             const std::filesystem::path pad = MetingPad();
             std::ifstream in( pad );
             if( !in )
             {
-                Logboek::Schrijf( "start", "meting.txt niet gevonden op "
-                                               + pad.string() + " -- standaard "
+                Logboek::Schrijf( "start", "meting.txt not found at "
+                                               + Logboek::KortPad( pad ) + " -- default "
                                                + std::to_string( m_afstandsFactor ) );
                 return;
             }
@@ -109,23 +117,29 @@ namespace Ritten
             {
                 m_afstandsFactor = f;
                 m_bewaardeFactor = f;
-                Logboek::Schrijf( "start", "afstandsfactor uit vorige sessie: "
+                Logboek::Schrijf( "start", "distance factor from previous session: "
                                                + std::to_string( f ) );
             }
             else
             {
-                Logboek::Schrijf( "start", "afstandsfactor in meting.txt afgekeurd: "
+                Logboek::Schrijf( "start", "distance factor in meting.txt rejected: "
                                                + std::to_string( f ) );
             }
         }
         catch( const std::exception &ex )
         {
-            Logboek::Schrijf( "start", std::string( "meting.txt niet te lezen: " ) + ex.what() );
+            Logboek::Schrijf( "start", std::string( "meting.txt not readable: " ) + Logboek::KorteFout( ex.what() ) );
         }
         catch( ... )
         {
-            Logboek::Schrijf( "start", "meting.txt niet te lezen (onbekende fout)" );
+            Logboek::Schrijf( "start", "meting.txt not readable (unknown error)" );
         }
+    }
+
+    TruckTracking::~TruckTracking()
+    {
+        if( m_saveThread.joinable() ) m_saveThread.join();
+        BewaarVoertuigen( true );
     }
 
     TruckTracking::TruckTracking( TripLogger &logger, FuelCosts &brandstof )
@@ -140,9 +154,8 @@ namespace Ritten
         std::ifstream in( TachoPad() );
         if( !in ) return;
 
-        // Twee getallen: resterende spelminuten en de periodelengte. Geen
-        // JSON-bibliotheek nodig, en niets dat stuk kan door een half
-        // geschreven bestand.
+        // Two numbers: remaining game minutes and the period length. No JSON
+        // library needed, and nothing that can break on a half-written file.
         double rest = -1.0;
         double periode = 0.0;
         if( in >> rest >> periode )
@@ -151,8 +164,8 @@ namespace Ritten
             if( periode > 60.0 ) m_rustPeriodeMax = periode;
         }
 
-        // De tacho-instelling staat op dezelfde regel erachter. Ontbreekt hij
-        // (bestand van een oudere versie), dan blijft de standaardstand staan.
+        // The tacho setting is on the same line after it. If missing (file
+        // from an older version), the default mode stays.
         int stand = 0;
         double maxRij = 0.0, pauze = 0.0, maxDag = 0.0, rust = 0.0;
         if( in >> stand >> maxRij >> pauze >> maxDag >> rust )
@@ -176,22 +189,424 @@ namespace Ritten
         m_laatstBewaardeRest = m_getoondeRestMin;
     }
 
+    // ---- Per-vehicle counter -----------------------------------------------
+
+    void TruckTracking::LaadVoertuigen()
+    {
+        m_voertuigenGeladen = true;
+        std::ifstream in( VoertuigenPad() );
+        if( !in ) return;
+        std::string regel;
+        while( std::getline( in, regel ) )
+        {
+            // merk|model|kmStand|liters|km
+            std::vector<std::string> delen;
+            std::size_t begin = 0;
+            for( ;; )
+            {
+                const std::size_t p = regel.find( '|', begin );
+                delen.push_back( regel.substr( begin, p == std::string::npos ? std::string::npos : p - begin ) );
+                if( p == std::string::npos ) break;
+                begin = p + 1;
+            }
+            // 5 fields = old format (only litres/km), 21 = with driving style.
+            if( delen.size() != 5 && delen.size() != 21 ) continue;
+            try
+            {
+                VoertuigTeller v;
+                v.merk = delen[ 0 ];
+                v.model = delen[ 1 ];
+                v.kmStand = std::stod( delen[ 2 ] );
+                v.liters = std::stod( delen[ 3 ] );
+                v.km = std::stod( delen[ 4 ] );
+                if( delen.size() == 21 )
+                {
+                    auto lees = [ &delen ]( RijstijlTelling &t, std::size_t i )
+                    {
+                        t.rijdendSec = std::stod( delen[ i ] );
+                        t.uitrolSec = std::stod( delen[ i + 1 ] );
+                        t.volgasSec = std::stod( delen[ i + 2 ] );
+                        t.stationairSec = std::stod( delen[ i + 3 ] );
+                        t.totaalSec = std::stod( delen[ i + 4 ] );
+                        t.km = std::stod( delen[ i + 5 ] );
+                        t.geladenSec = std::stod( delen[ i + 6 ] );
+                        t.remmingen = std::stoi( delen[ i + 7 ] );
+                    };
+                    lees( v.leeg, 5 );
+                    lees( v.geladen, 13 );
+                }
+                if( v.kmStand >= 0.0 && v.liters >= 0.0 && v.km >= 0.0 ) m_voertuigen.push_back( v );
+            }
+            catch( ... ) { /* kapotte regel overslaan, de rest blijft bruikbaar */ }
+        }
+        Logboek::Schrijf( "start", "voertuigen.txt: " + std::to_string( m_voertuigen.size() ) + " vehicle(s) loaded" );
+    }
+
+    void TruckTracking::BewaarVoertuigen( bool forceer )
+    {
+        if( !m_voertuigenGewijzigd ) return;
+        // At most once a minute to disk, unless it really must (reset,
+        // shutdown). Writing every reading would be needless I/O.
+        const auto nu = std::chrono::steady_clock::now();
+        if( !forceer && std::chrono::duration<double>( nu - m_voertuigenLaatstBewaard ).count() < 60.0 ) return;
+        try
+        {
+            std::ofstream uit( VoertuigenPad(), std::ios::trunc );
+            if( !uit ) return;
+            // Three fixed decimals, otherwise the stream writes 19013.393 as
+            // "19013" and the fractional part of the odometer is lost.
+            uit << std::fixed << std::setprecision( 3 );
+            auto telling = [ &uit ]( const RijstijlTelling &t )
+            {
+                uit << '|' << t.rijdendSec << '|' << t.uitrolSec << '|' << t.volgasSec << '|' << t.stationairSec
+                    << '|' << t.totaalSec << '|' << t.km << '|' << t.geladenSec << '|' << t.remmingen;
+            };
+            for( const VoertuigTeller &v : m_voertuigen )
+            {
+                // merk|model|kmStand|liters|km|  leeg: 8 fields  |  geladen: 8 fields
+                uit << v.merk << '|' << v.model << '|' << v.kmStand << '|' << v.liters << '|' << v.km;
+                telling( v.leeg );
+                telling( v.geladen );
+                uit << '\n';
+            }
+            m_voertuigenLaatstBewaard = nu;
+            m_voertuigenGewijzigd = false;
+        }
+        catch( ... ) { /* opslaan mag nooit storen */ }
+    }
+
+    void TruckTracking::IdentificeerVoertuig()
+    {
+        // Needed: brand and model from the configuration, and an odometer.
+        if( m_configMerk.empty() || m_kilometerstandKm <= 0.0 ) return;
+        if( m_gepauzeerd ) return;  // in garage or menu: the reading is not this truck's yet
+        if( !m_kmStandVersNaConfig )
+        {
+            // No different reading seen yet. After three seconds go ahead anyway:
+            // then they apparently really are equal, or it is the first truck of
+            // the session (then there was no previous one).
+            if( std::chrono::duration<double>( std::chrono::steady_clock::now() - m_configMoment ).count() < 3.0 )
+                return;
+        }
+        if( !m_voertuigenGeladen ) LaadVoertuigen();
+
+        // Find the same brand and model with an odometer that is NOT above
+        // the current one (a counter only goes up) and is closest to it. That
+        // keeps two identical trucks apart: their readings never cross.
+        int beste = -1;
+        double kleinsteVerschil = 1e18;
+        for( std::size_t i = 0; i < m_voertuigen.size(); ++i )
+        {
+            const VoertuigTeller &v = m_voertuigen[ i ];
+            if( v.merk != m_configMerk || v.model != m_configModel ) continue;
+            const double verschil = m_kilometerstandKm - v.kmStand;
+            if( verschil < -1.0 ) continue;  // counter lower than saved: different truck
+            if( verschil < kleinsteVerschil ) { kleinsteVerschil = verschil; beste = static_cast<int>( i ); }
+        }
+        if( beste < 0 )
+        {
+            VoertuigTeller v;
+            v.merk = m_configMerk;
+            v.model = m_configModel;
+            v.kmStand = m_kilometerstandKm;
+            m_voertuigen.push_back( v );
+            beste = static_cast<int>( m_voertuigen.size() ) - 1;
+            m_voertuigenGewijzigd = true;
+            Logboek::Schrijf( "event", "new vehicle: " + v.merk + " " + v.model
+                                            + " at " + std::to_string( static_cast<long long>( m_kilometerstandKm ) ) + " km" );
+        }
+        else
+        {
+            Logboek::Schrijf( "event", "vehicle recognised: " + m_voertuigen[ beste ].merk + " "
+                                            + m_voertuigen[ beste ].model + " ("
+                                            + std::to_string( static_cast<long long>( m_voertuigen[ beste ].km ) ) + " km counted)" );
+        }
+        m_huidigVoertuig = beste;
+
+        // Now the truck is known and the odometer fresh: read the save. At
+        // this moment the live reading is exactly the one it was loaded with.
+        m_saveHerkansingen = 0;
+        StartSaveLezen( m_kilometerstandKm );
+    }
+
+    void TruckTracking::ResetVoertuigTeller()
+    {
+        if( m_huidigVoertuig < 0 || m_huidigVoertuig >= static_cast<int>( m_voertuigen.size() ) ) return;
+        VoertuigTeller &v = m_voertuigen[ m_huidigVoertuig ];
+        v.liters = 0.0;
+        v.km = 0.0;
+        v.leeg = RijstijlTelling{};
+        v.geladen = RijstijlTelling{};
+        m_rijstijlVenster.clear();
+        m_rijstijlVensterSom = RijstijlTelling{};
+        m_rijstijlPending = RijstijlMeting{};
+        m_voertuigenGewijzigd = true;
+        BewaarVoertuigen( true );
+        Logboek::Schrijf( "event", "vehicle counter reset: " + v.merk + " " + v.model );
+    }
+
+    // ---- Trip counter from the save -----------------------------------------
+
+    void TruckTracking::StartSaveLezen( const double kmStandBijLaden )
+    {
+        if( m_huidigVoertuig < 0 || m_huidigVoertuig >= static_cast<int>( m_voertuigen.size() ) ) return;
+        if( m_saveBezig )
+        {
+            // Another read still in progress: queue this one, do not drop it.
+            // VerwerkSaveResultaat picks it up as soon as the previous one is
+            // done.
+            m_herlaadKmStand = kmStandBijLaden;
+            m_herlaadMoment = std::chrono::steady_clock::now() - std::chrono::seconds( 2 );
+            return;
+        }
+        if( m_saveThread.joinable() ) m_saveThread.join();
+
+        m_saveBezig = true;
+        m_saveKlaar = false;
+        m_saveResultaat.reset();
+        m_saveFout.clear();
+        m_saveVoertuig = m_huidigVoertuig;
+        m_saveKmStandGevraagd = kmStandBijLaden;
+        m_saveLitersBijStart = m_voertuigen[ m_huidigVoertuig ].liters;
+        m_saveKmBijStart = m_voertuigen[ m_huidigVoertuig ].km;
+
+        // In the background: 100-300 ms per save, never on the render thread.
+        // std::thread can (rarely) throw, and we are inside an SCS callback.
+        try
+        {
+            m_saveThread = std::thread( [ this, kmStandBijLaden ]()
+            {
+                std::string fout;
+                std::optional<SaveTripteller> r;
+                try { r = SaveLezer::ZoekInAlleSaves( kmStandBijLaden, fout ); }
+                catch( ... ) { fout = "exception while reading"; }
+                std::lock_guard<std::mutex> slot( m_saveMutex );
+                m_saveResultaat = std::move( r );
+                m_saveFout = std::move( fout );
+                m_saveKlaar = true;
+            } );
+        }
+        catch( ... )
+        {
+            m_saveBezig = false;
+            Logboek::Schrijf( "event", "save: background thread could not start, own counter" );
+        }
+    }
+
+    void TruckTracking::VerwerkSaveResultaat()
+    {
+        const auto nu = std::chrono::steady_clock::now();
+
+        // Scheduled read after a jump back: only after two seconds, and only
+        // if there has been no truck switch meanwhile.
+        if( m_herlaadKmStand >= 0.0 && !m_saveBezig && m_huidigVoertuig >= 0
+            && std::chrono::duration<double>( nu - m_herlaadMoment ).count() >= 2.0 )
+        {
+            const double stand = m_herlaadKmStand;
+            m_herlaadKmStand = -1.0;
+            m_saveHerkansingen = 0;
+            StartSaveLezen( stand );
+            return;
+        }
+        // Retry: the save was half written (autosave in progress).
+        if( m_saveHerkansingen == 1 && !m_saveBezig && m_huidigVoertuig >= 0
+            && std::chrono::duration<double>( nu - m_saveHerkansingMoment ).count() >= 10.0 )
+        {
+            m_saveHerkansingen = 2;  // not again after this
+            StartSaveLezen( m_saveKmStandGevraagd );
+            return;
+        }
+
+        if( !m_saveBezig ) return;
+        std::optional<SaveTripteller> r;
+        std::string fout;
+        {
+            std::lock_guard<std::mutex> slot( m_saveMutex );
+            if( !m_saveKlaar ) return;
+            r = m_saveResultaat;
+            fout = m_saveFout;
+        }
+        m_saveBezig = false;
+        if( m_saveThread.joinable() ) m_saveThread.join();
+
+        if( !r )
+        {
+            if( !fout.empty() && m_saveHerkansingen == 0 )
+            {
+                // Read error: the save was probably just being written. Once more in
+                // ten seconds, then give up.
+                m_saveHerkansingen = 1;
+                m_saveHerkansingMoment = nu;
+                Logboek::Schrijf( "event", "save: not read (" + fout + "), retrying in 10 s" );
+                return;
+            }
+            // No block at this reading: bus, Scout, quick-job truck, Steam Cloud
+            // save, or a save that was not written. Then simply keep our own
+            // counter. Only log, do not complain.
+            Logboek::Schrijf( "event", fout.empty() ? "save: no truck at this odometer, own counter"
+                                                      : "save: not read (" + fout + "), own counter" );
+            return;
+        }
+        if( m_saveVoertuig != m_huidigVoertuig || m_saveVoertuig < 0
+            || m_saveVoertuig >= static_cast<int>( m_voertuigen.size() ) )
+        {
+            Logboek::Schrijf( "event", "save: result for a different vehicle, ignored" );
+            return;
+        }
+
+        // Counter = dashboard counter from the save + what has been counted
+        // since the read started. That way nothing of the interval is lost.
+        VoertuigTeller &v = m_voertuigen[ m_saveVoertuig ];
+        const double sindsLiters = v.liters - m_saveLitersBijStart;
+        const double sindsKm = v.km - m_saveKmBijStart;
+        v.liters = r->tripLiters + std::max( 0.0, sindsLiters );
+        v.km = r->tripKm + std::max( 0.0, sindsKm );
+        m_voertuigenGewijzigd = true;
+        BewaarVoertuigen( true );
+
+        char buf[ 160 ];
+        std::snprintf( buf, sizeof( buf ), "save (%s): dashboard trip %.2f L / %.2f km taken over, odometer %.3f",
+                       r->bron.c_str(), r->tripLiters, r->tripKm, r->kilometerstandKm );
+        Logboek::Schrijf( "event", buf );
+    }
+
+    std::string TruckTracking::HuidigVoertuigNaam() const
+    {
+        if( m_huidigVoertuig < 0 || m_huidigVoertuig >= static_cast<int>( m_voertuigen.size() ) ) return {};
+        const VoertuigTeller &v = m_voertuigen[ m_huidigVoertuig ];
+        return v.merk + " " + v.model;
+    }
+
+    // ---- Driving style ------------------------------------------------------
+
+    void TruckTracking::TelOp( RijstijlTelling &t, const RijstijlMeting &m, const int teken )
+    {
+        t.totaalSec += teken * m.dSec;
+        t.km += teken * m.dKm;
+        t.rijdendSec += teken * m.rijdendSec;
+        t.uitrolSec += teken * m.uitrolSec;
+        t.volgasSec += teken * m.volgasSec;
+        t.stationairSec += teken * m.stationairSec;
+        t.geladenSec += teken * m.geladenSec;
+        t.remmingen += teken * m.remming;
+    }
+
+    void TruckTracking::RijstijlTellen( const double snelheidKmh, const double gas, const double dKm, const double dSec )
+    {
+        if( dSec <= 0.0 || dSec > 5.0 ) return;  // gap in the measurement: skip
+
+        // Add this reading to the running second.
+        const double snelheidAbs = std::fabs( snelheidKmh );
+        const bool rijdend = snelheidAbs > 10.0;
+        RijstijlMeting &p = m_rijstijlPending;
+        p.dKm += dKm;
+        p.dSec += dSec;
+        if( rijdend ) p.rijdendSec += dSec;
+        if( rijdend && gas < 0.10 ) p.uitrolSec += dSec;
+        if( gas > 0.90 ) p.volgasSec += dSec;
+        // Still and fuel is going down: then the engine is running. Measured,
+        // not assumed -- no engine-on channel is registered.
+        if( snelheidAbs < 1.0 && m_gladLiterPerUur > 0.3 ) p.stationairSec += dSec;
+        if( m_heeftAanhanger ) p.geladenSec += dSec;
+        if( p.dSec < 1.0 ) return;  // second not full yet
+
+        // Second is full: hard braking = more than 8 km/h lost since the
+        // start of the previous second. An event, not a duration.
+        if( m_vorigeSnelheidVoorRem >= 0.0 && ( m_vorigeSnelheidVoorRem - snelheidAbs ) > 8.0 ) p.remming = 1;
+        m_vorigeSnelheidVoorRem = snelheidAbs;
+
+        // Add to the window, and drop off the front as soon as it gets too long.
+        m_rijstijlVenster.push_back( p );
+        TelOp( m_rijstijlVensterSom, p, +1 );
+        while( m_rijstijlVenster.size() > 1
+               && ( m_rijstijlVensterSom.rijdendSec > RIJSTIJL_VENSTER_RIJDEND_SEC
+                    || m_rijstijlVensterSom.totaalSec > RIJSTIJL_VENSTER_SEC ) )
+        {
+            TelOp( m_rijstijlVensterSom, m_rijstijlVenster.front(), -1 );
+            m_rijstijlVenster.pop_front();
+        }
+
+        // And into this vehicle's reference, in the bucket of this situation.
+        if( m_huidigVoertuig >= 0 && m_huidigVoertuig < static_cast<int>( m_voertuigen.size() ) )
+        {
+            VoertuigTeller &v = m_voertuigen[ m_huidigVoertuig ];
+            TelOp( ( p.geladenSec > 0.5 * p.dSec ) ? v.geladen : v.leeg, p, +1 );
+            m_voertuigenGewijzigd = true;
+        }
+        p = RijstijlMeting{};
+    }
+
+    TruckTracking::RijstijlStatus TruckTracking::HuidigeRijstijl() const
+    {
+        RijstijlStatus r;
+
+        // ---- Layer 1: the direct meter. From the last second, always. ----
+        {
+            const double snelheid = std::fabs( m_liveSnelheidKmh );
+            const double gas = m_gaspedaal;
+            if( snelheid < 1.0 )
+            {
+                if( m_gladLiterPerUur > 0.3 ) r.nu = RijstijlStatus::StilMotorAan;
+            }
+            else if( snelheid > 10.0 && gas < 0.10 ) r.nu = RijstijlStatus::Uitrollen;
+            else if( gas < 0.30 ) r.nu = RijstijlStatus::ZuinigNu;
+            else if( gas < 0.70 ) r.nu = RijstijlStatus::Normaal;
+            else r.nu = RijstijlStatus::Trekken;
+        }
+
+        // ---- Layer 2: the assessment. Only when there is a reference. ----
+        const RijstijlTelling &w = m_rijstijlVensterSom;
+        if( w.rijdendSec < 30.0 ) return r;
+        if( m_huidigVoertuig < 0 || m_huidigVoertuig >= static_cast<int>( m_voertuigen.size() ) ) return r;
+
+        r.geladen = w.geladenSec > 0.5 * w.totaalSec;
+        const VoertuigTeller &v = m_voertuigen[ m_huidigVoertuig ];
+        RijstijlTelling ref = r.geladen ? v.geladen : v.leeg;
+        // Subtract the window: it is also in the reference, and you do not
+        // compare with yourself. Only the seconds that fell in THIS situation.
+        for( const RijstijlMeting &m : m_rijstijlVenster )
+        {
+            const bool mGeladen = m.geladenSec > 0.5 * m.dSec;
+            if( mGeladen == r.geladen ) TelOp( ref, m, -1 );
+        }
+        if( ref.rijdendSec < RIJSTIJL_REFERENTIE_SEC ) return r;  // no reference yet: only layer 1
+
+        // Braking per ten minutes of driving -- not per kilometre, that is map scale.
+        const double uNu = w.uitrolSec / w.rijdendSec * 100.0;
+        const double vNu = w.volgasSec / w.rijdendSec * 100.0;
+        const double rNu = w.remmingen / w.rijdendSec * 600.0;
+        const double uRef = ref.uitrolSec / ref.rijdendSec * 100.0;
+        const double vRef = ref.volgasSec / ref.rijdendSec * 100.0;
+        const double rRef = ref.remmingen / ref.rijdendSec * 600.0;
+
+        // Majority, no weights. Margin 5 percentage points / 2 braking events
+        // per ten minutes.
+        int beter = 0, slechter = 0;
+        if( uNu > uRef + 5.0 ) ++beter; else if( uNu < uRef - 5.0 ) ++slechter;
+        if( vNu < vRef - 5.0 ) ++beter; else if( vNu > vRef + 5.0 ) ++slechter;
+        if( rNu < rRef - 2.0 ) ++beter; else if( rNu > rRef + 2.0 ) ++slechter;
+
+        if( beter >= 2 && slechter == 0 ) r.stand = RijstijlStatus::Zuinig;
+        else if( slechter >= 2 && beter == 0 ) r.stand = RijstijlStatus::Sportief;
+        else r.stand = RijstijlStatus::Gewoon;
+        return r;
+    }
+
     void TruckTracking::RegistreerBijTelemetrie( const scs_telemetry_init_params_v101_t *params )
     {
-        // Kanaalnamen als platte tekst -- zie de opmerking bovenaan
-        // TruckTracking.hxx voor waarom.
+        // Channel names as plain text -- see the note at the top of
+        // TruckTracking.hxx for why.
         params->register_for_channel(
             "game.time", SCS_U32_NIL, SCS_VALUE_TYPE_u32,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::GameTimeCallback, this );
 
-        // --- MEETPUNT: bestaat er een kanaal voor het huidige land? -------
+        // --- MEASUREMENT POINT: is there a channel for the current country? --
         //
-        // We weten het niet, dus we proberen het gewoon. Elk kanaal dat het
-        // spel accepteert komt in debug.log te staan, met de waarde erbij.
-        // Levert dit niets op, dan is automatische prijs-per-land niet
-        // haalbaar en blijft de handmatige prijs staan -- dan hebben we vijf
-        // minuten verloren in plaats van een systeem dat stilletjes verkeerde
-        // bedragen toont.
+        // We do not know, so we simply try. Every channel the game accepts
+        // ends up in debug.log, with its value. If this yields nothing,
+        // automatic price-per-country is not feasible and the manual price
+        // stays -- then we lost five minutes instead of a system that quietly
+        // shows wrong amounts.
         {
             static const char *kandidaten[] = {
                 "game.country",
@@ -213,53 +628,52 @@ namespace Ritten
                 }
             }
             Logboek::Schrijf( "start", gevonden.empty()
-                                            ? "landkanalen: GEEN enkel kanaal geaccepteerd"
-                                            : ( "landkanalen geaccepteerd: " + gevonden ) );
+                                            ? "country channels: NO channel accepted"
+                                            : ( "country channels accepted: " + gevonden ) );
         }
 
-        // Resterende rijtijd volgens het spel zelf. Dit WAS de tachograaf-bron;
-        // in 1.60 bestaat het kanaal niet meer (gemeten: alle drie de typen
-        // geweigerd), dus we tellen zelf. De registratiepoging blijft staan
-        // voor het geval SCS het ooit terugbrengt.
+        // Remaining driving time according to the game itself. This WAS the
+        // tachograph source; in 1.60 the channel no longer exists (measured:
+        // all three types refused), so we count ourselves. The registration
+        // attempt stays in case SCS ever brings it back.
         //
-        // De EIGEN ETA van het spel naar de bestemming. Dit is verreweg de
-        // beste bron: de Route Advisor houdt rekening met de werkelijke
-        // route, snelheidslimieten en veerboten -- dingen die wij met een
-        // gemiddelde snelheid nooit goed benaderen.
+        // The game's OWN ETA to the destination. By far the best source: the
+        // Route Advisor accounts for the actual route, speed limits and
+        // ferries -- things we never approximate well with an average speed.
         params->register_for_channel(
             "truck.navigation.time", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::NavigatieTijdCallback, this );
 
-        // Het rustkanaal gaf niets door ("kanaal --" op de HUD). Twee dingen
-        // gefixt: we KIJKEN nu of de registratie lukt, en we proberen meerdere
-        // typen. Als het spel dit kanaal als u32 of float aanbiedt in plaats
-        // van s32, mislukt de registratie geruisloos -- precies wat we zagen.
+        // The rest channel passed nothing ("kanaal --" on the HUD). Two
+        // things fixed: we now CHECK whether registration succeeds, and we try
+        // several types. If the game offers this channel as u32 or float
+        // instead of s32, registration fails silently -- exactly what we saw.
         m_rustKanaalType = 0;
         if( params->register_for_channel(
                 "game.next.rest.stop", SCS_U32_NIL, SCS_VALUE_TYPE_s32,
                 SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::RustStopCallback, this ) == SCS_RESULT_ok )
         {
-            m_rustKanaalType = 1; // s32
+            m_rustKanaalType = 1;  // s32
         }
         else if( params->register_for_channel(
                      "game.next.rest.stop", SCS_U32_NIL, SCS_VALUE_TYPE_u32,
                      SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::RustStopCallback, this ) == SCS_RESULT_ok )
         {
-            m_rustKanaalType = 2; // u32
+            m_rustKanaalType = 2;  // u32
         }
         else if( params->register_for_channel(
                      "game.next.rest.stop", SCS_U32_NIL, SCS_VALUE_TYPE_float,
                      SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::RustStopCallback, this ) == SCS_RESULT_ok )
         {
-            m_rustKanaalType = 3; // float
+            m_rustKanaalType = 3;  // float
         }
 
-        // Vastleggen wat het spel wel en niet aanbiedt. Scheelt bij een
-        // volgende afwijking het hele uitzoekwerk: je ziet meteen of een
-        // kanaal er is.
+        // Record what the game does and does not offer. Saves the whole
+        // investigation on the next deviation: you see right away whether a
+        // channel is there.
         {
             static const char *typeNaam[] = { "GEEN", "s32", "u32", "float" };
-            Logboek::Schrijf( "start", std::string( "kanaal game.next.rest.stop -> " )
+            Logboek::Schrijf( "start", std::string( "channel game.next.rest.stop -> " )
                                           + typeNaam[ m_rustKanaalType ] );
         }
 
@@ -275,42 +689,43 @@ namespace Ritten
             "truck.wear.chassis", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::SchadeCallback, this );
 
-        // Nieuw: het spel's EIGEN, al-berekende resterende navigatie-
-        // afstand (in meters, volgt de echte weg -- niet hemelsbreed).
-        // Veel nauwkeuriger dan onze eigen optelsom via snelheid x tijd,
-        // want het spel houdt al rekening met bochten/omwegen. Opgezocht
-        // en bevestigd via de officiele SCS SDK-headers (RenCloud's
-        // scs-sdk-plugin, publiek op GitHub) -- niet gegokt.
+        // New: the game's OWN, already computed remaining navigation distance
+        // (in metres, follows the real road -- not as the crow flies). Much
+        // more accurate than our own sum via speed x time, because the game
+        // already accounts for bends/detours. Looked up and confirmed via the
+        // official SCS SDK headers (RenCloud's scs-sdk-plugin, public on
+        // GitHub) -- not guessed.
         params->register_for_channel(
             "truck.navigation.distance", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::NavigatieAfstandCallback, this );
 
-        // Puur voor logging/verificatie -- NIET (nog) gebruikt in de
-        // berekening. We willen eerst met echte cijfers zien of onze
-        // huidige aanpak (afstand / echte snelheid) al klopt, voordat we
-        // deze factor er blind bij zouden vermenigvuldigen. Zie de discussie
-        // over waarom local_scale de kloktijd regelt, niet je rij-fysica.
+        // Purely for logging/verification -- NOT (yet) used in the
+        // calculation. We first want to see with real figures whether our
+        // current approach (distance / real speed) is already right, before
+        // blindly multiplying this factor in. See the discussion on why
+        // local_scale governs the clock, not your driving physics.
         params->register_for_channel(
             "local_scale", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::LocalScaleCallback, this );
 
-        // --- Nieuwe kanalen -------------------------------------------
-        // Namen geverifieerd tegen de officiele SCS-header
-        // scssdk_telemetry_truck_common_channels.h (via RenCloud's publieke
-        // kopie) -- inclusief het feit dat de limiet "truck.navigation.speed.limit"
-        // heet met PUNTEN, niet "speed_limit" met een liggend streepje.
+        // --- New channels ---------------------------------------------
+        // Names verified against the official SCS header
+        // scssdk_telemetry_truck_common_channels.h (via RenCloud's public
+        // copy) -- including the fact that the limit is called
+        // "truck.navigation.speed.limit" with DOTS, not "speed_limit" with
+        // an underscore.
 
-        // Resterend bereik in km -- het spel rekent dit zelf al uit op basis
-        // van je werkelijke verbruik, dus beter dan onze eigen deling.
+        // Remaining range in km -- the game already computes this itself
+        // based on your actual consumption, so better than our own division.
         params->register_for_channel(
             "truck.fuel.range", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::BereikCallback, this );
 
-        // LET OP: dit kanaal is liter per KM, niet per 100 km. We rekenen
-        // pas om in HuidigeVoertuigStatus(). De SCS-documentatie waarschuwt
-        // dat deze waarde in ETS2/ATS vrij statisch is en meer afhangt van
-        // je trailer en driver-skills dan van je werkelijke rijgedrag --
-        // dus zie het als indicatie, niet als exacte meting.
+        // NOTE: this channel is litres per KM, not per 100 km. We only
+        // convert in HuidigeVoertuigStatus(). The SCS documentation warns
+        // that this value is fairly static in ETS2/ATS and depends more on
+        // your trailer and driver skills than on your actual driving -- so
+        // treat it as an indication, not an exact measurement.
         params->register_for_channel(
             "truck.fuel.consumption.average", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::VerbruikCallback, this );
@@ -319,29 +734,29 @@ namespace Ritten
             "truck.odometer", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::KilometerstandCallback, this );
 
-        // Snelheidslimiet in m/s, zoals de Route Advisor hem toont. Volgt
-        // dus ook jouw eigen "Route Advisor speed limit"-instelling in het
-        // spel: staat die uit, dan komt hier niets binnen en blijft de
-        // waarschuwing gewoon stil.
+        // Speed limit in m/s, as the Route Advisor shows it. So it also
+        // follows your own "Route Advisor speed limit" setting in the game:
+        // if that is off, nothing arrives here and the warning simply stays
+        // quiet.
         params->register_for_channel(
             "truck.navigation.speed.limit", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::SnelheidslimietCallback, this );
 
-        // Ingestelde cruise-snelheid in m/s; 0 betekent uitgeschakeld.
+        // Set cruise speed in m/s; 0 means off.
         params->register_for_channel(
             "truck.cruise_control", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::CruiseControlCallback, this );
 
-        // Gaspedaal zoals de simulatie het gebruikt, 0..1. Hiermee weten we
-        // METEEN dat je gas hebt losgelaten -- de brandstofmeting merkt dat
-        // pas een paar tellen later, want die kijkt terug in de tijd. Bij
-        // zo'n omslag gooien we het meetvenster leeg, zodat het cijfer niet
-        // nog seconden op je oude rijgedrag blijft staan.
+        // Throttle as the simulation uses it, 0..1. With this we know
+        // IMMEDIATELY that you released the throttle -- the fuel measurement
+        // only notices a few counts later, because it looks back in time. On
+        // such a flip we empty the measurement window, so the figure does not
+        // stay on your old driving behaviour for seconds.
         params->register_for_channel(
             "truck.effective.throttle", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::GaspedaalCallback, this );
 
-        // Schade per onderdeel, los van het chassis dat we al hadden.
+        // Damage per component, apart from the chassis we already had.
         params->register_for_channel(
             "truck.wear.engine", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::SchadeMotorCallback, this );
@@ -355,9 +770,9 @@ namespace Ritten
             "truck.wear.wheels", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::SchadeWielenCallback, this );
 
-        // Aanhanger. De trailer-kanalen zijn genummerd ("trailer.0.") sinds
-        // het spel meerdere opleggers ondersteunt (doubles/triples); we
-        // volgen alleen de eerste, want dat is degene met jouw lading erin.
+        // Trailer. The trailer channels are numbered ("trailer.0.") since
+        // the game supports multiple trailers (doubles/triples); we only
+        // follow the first, because that is the one with your cargo in it.
         params->register_for_channel(
             "trailer.0.wear.chassis", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::AanhangerSchadeCallback, this );
@@ -365,27 +780,27 @@ namespace Ritten
             "trailer.0.cargo.damage", SCS_U32_NIL, SCS_VALUE_TYPE_float,
             SCS_TELEMETRY_CHANNEL_FLAG_none, &TruckTracking::LadingSchadeCallback, this );
 
-        // Vertelt ons wanneer een job start (bron/bestemming/lading/afstand)
-        // en wanneer het voertuig zelf verandert (tankinhoud).
+        // Tells us when a job starts (source/destination/cargo/distance) and
+        // when the vehicle itself changes (tank capacity).
         params->register_for_event( SCS_TELEMETRY_EVENT_configuration, &TruckTracking::ConfigCallback, this );
 
-        // Vertelt ons wanneer een job daadwerkelijk AFGEROND wordt (inkomen,
-        // schade, op tijd of niet, geannuleerd of niet) -- dit is de
-        // betrouwbaarste bron hiervoor, betrouwbaarder dan alleen kijken of
-        // de job-configuratie leeg wordt.
+        // Tells us when a job is actually COMPLETED (income, damage, on time
+        // or not, cancelled or not) -- this is the most reliable source for
+        // that, more reliable than just watching the job configuration go
+        // empty.
         params->register_for_event( SCS_TELEMETRY_EVENT_gameplay, &TruckTracking::GameplayEventCallback, this );
 
-        // Pauze-detectie (zie opmerking bij GepauzeerdCallback in de header) --
-        // zelfde events als in het officiele SCS-voorbeeld.
+        // Pause detection (see note at GepauzeerdCallback in the header) --
+        // same events as in the official SCS example.
         params->register_for_event( SCS_TELEMETRY_EVENT_paused, &TruckTracking::GepauzeerdCallback, this );
         params->register_for_event( SCS_TELEMETRY_EVENT_started, &TruckTracking::HervatCallback, this );
     }
 
-    // TIJDELIJK: schrijft elke configuratie-/gameplay-update (id + alle
-    // attributen) naar %APPDATA%\CabNavi\debug.log. Zo kunnen we
-    // precies zien wat het spel doorgeeft als iets niet klopt (job-detectie
-    // of afronding), in plaats van te gokken. Simpel/synchroon omdat dit
-    // weinig voorkomt -- geen aparte queue-thread nodig zoals bij TripLogger.
+    // TEMPORARY: writes every configuration/gameplay update (id + all
+    // attributes) to %APPDATA%\CabNavi\debug.log. That way we can see
+    // exactly what the game passes when something is off (job detection
+    // or completion), instead of guessing. Simple/synchronous because this
+    // is rare -- no separate queue thread needed like TripLogger.
     static void SchrijfDebugAttributen( const char *titel, const char *id, const scs_named_value_t *attributes )
     {
         std::filesystem::path pad;
@@ -432,7 +847,7 @@ namespace Ritten
                     uit << " (bool) = " << ( attr->value.value_bool.value ? "true" : "false" );
                     break;
                 default:
-                    uit << " (ander type: " << (int)attr->value.type << ")";
+                    uit << " (other type: " << (int)attr->value.type << ")";
                     break;
             }
             uit << "\n";
@@ -458,8 +873,8 @@ namespace Ritten
 
         if( configId == "truck" )
         {
-            // Tankinhoud opvragen zodra de truck-configuratie langskomt
-            // (bv. bij spawnen/wisselen van truck).
+            // Request the tank capacity as soon as the truck configuration comes
+            // by (e.g. on spawning/switching truck).
             if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "fuel.capacity" ) )
             {
                 if( attr->value.type == SCS_VALUE_TYPE_float )
@@ -467,6 +882,43 @@ namespace Ritten
                     m_tankInhoudLiters = attr->value.value_float.value;
                 }
             }
+
+            // Brand and model for the per-vehicle counter. MEASURED 02-09 in the
+            // configuration dump: "brand" = Scania, "name" = Streamline. The
+            // recognition itself only happens at the next reading, because then
+            // the odometer is there too -- and we need that to keep two identical
+            // trucks apart.
+            std::string merk, model;
+            if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "brand" ) )
+                if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
+                    merk = attr->value.value_string.value;
+            if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "name" ) )
+                if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
+                    model = attr->value.value_string.value;
+            if( !merk.empty() && ( merk != m_configMerk || model != m_configModel || m_huidigVoertuig < 0 ) )
+            {
+                // Different truck (or the first): save the previous one's counter
+                // and recognise again at the next reading.
+                BewaarVoertuigen( true );
+                m_configMerk = merk;
+                m_configModel = model;
+                m_huidigVoertuig = -1;
+                m_herlaadKmStand = -1.0;  // this was a switch, not a reload
+                m_brandstof.VoertuigGewisseld();  // the tank level jump is the other truck, not a refuel
+                m_rijstijlVenster.clear();
+                m_rijstijlVensterSom = RijstijlTelling{};
+                m_rijstijlPending = RijstijlMeting{};
+                m_vorigeSnelheidVoorRem = -1.0;
+                // First wait for a DIFFERENT odometer than the current one -- that is
+                // still the previous truck's. With a time limit in case two trucks
+                // happen to be equal.
+                m_kmStandVersNaConfig = false;
+                m_kmStandBijConfig = m_kilometerstandKm;
+                m_configMoment = std::chrono::steady_clock::now();
+            }
+            // Also record it in the trip, so webhook and history finally show a
+            // truck -- those fields were always empty.
+            if( !merk.empty() ) { m_huidigeRit.voertuigMerk = merk; m_huidigeRit.voertuigModel = model; }
             return;
         }
 
@@ -475,10 +927,10 @@ namespace Ritten
             return;
         }
 
-        // Een niet-lege "cargo.id" betekent dat er een nieuwe job is geladen;
-        // een lege configuratie betekent dat de job-slot leeg is (net
-        // afgerond/geannuleerd -- de daadwerkelijke afronding met
-        // inkomen/schade komt via het gameplay-event hieronder).
+        // A non-empty "cargo.id" means a new job has been loaded; an empty
+        // configuration means the job slot is empty (just completed/cancelled
+        // -- the actual completion with income/damage comes via the gameplay
+        // event below).
         const scs_named_value_t *cargoAttr = ZoekAttribuut( cfg->attributes, "cargo.id" );
         const bool heeftLading = cargoAttr != nullptr && cargoAttr->value.type == SCS_VALUE_TYPE_string
                                   && cargoAttr->value.value_string.value != nullptr
@@ -489,12 +941,12 @@ namespace Ritten
             return;
         }
 
-        // Het spel stuurt deze "job"-configuratie meerdere keren voor
-        // dezelfde job (bv. eerst met cargo.loaded=false, daarna true zodra
-        // je echt geladen bent) -- als we al bezig zijn met exact dezelfde
-        // lading (op interne cargo.id, niet de weergavenaam), is dit een
-        // herhaling en geen nieuwe job. Anders zou de ritklok en het
-        // brandstofverbruik steeds opnieuw beginnen.
+        // The game sends this "job" configuration several times for the same
+        // job (e.g. first with cargo.loaded=false, then true once you are
+        // really loaded) -- if we are already on exactly the same cargo (by
+        // internal cargo.id, not the display name), this is a repeat and not
+        // a new job. Otherwise the trip clock and fuel consumption would keep
+        // starting over.
         if( m_actief && m_huidigeLadingId == cargoAttr->value.value_string.value )
         {
             return;
@@ -506,11 +958,11 @@ namespace Ritten
         nieuw.id = "vracht-" + NuAlsIso();
         nieuw.startTijdIso = NuAlsIso();
         nieuw.economyStartTijd = m_economyTijd;
-        nieuw.lading = cargoAttr->value.value_string.value; // fallback: interne id
+        nieuw.lading = cargoAttr->value.value_string.value;  // fallback: internal id
         if( const scs_named_value_t *naamAttr = ZoekAttribuut( cfg->attributes, "cargo" ) )
         {
-            // "cargo" is de nette weergavenaam (bv. "Cement"), "cargo.id" de
-            // interne code (bv. "cement") -- toon de nette naam als die er is.
+            // "cargo" is the tidy display name (e.g. "Cement"), "cargo.id" the
+            // internal code (e.g. "cement") -- show the tidy name if present.
             if( naamAttr->value.type == SCS_VALUE_TYPE_string && naamAttr->value.value_string.value )
                 nieuw.lading = naamAttr->value.value_string.value;
         }
@@ -540,8 +992,8 @@ namespace Ritten
             if( attr->value.type == SCS_VALUE_TYPE_u32 )
                 nieuw.geplandeAfstandKm = static_cast<double>( attr->value.value_u32.value );
         }
-        // Ladinggewicht (kg) -- hoort bij idee #6, samen met de
-        // aanhangerschade. Komt als float uit de job-config.
+        // Cargo weight (kg) -- belongs to idea #6, together with the trailer
+        // damage. Comes as float from the job config.
         if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "cargo.mass" ) )
         {
             if( attr->value.type == SCS_VALUE_TYPE_float )
@@ -552,7 +1004,11 @@ namespace Ritten
         }
 
         m_huidigeRit = nieuw;
-        m_gladdeSchattingMin = -1.0; // verse rit, verse schatting
+        // Take brand and model from the latest truck configuration, otherwise
+        // those fields in webhook and history are empty again.
+        m_huidigeRit.voertuigMerk = m_configMerk;
+        m_huidigeRit.voertuigModel = m_configModel;
+        m_gladdeSchattingMin = -1.0;  // fresh trip, fresh estimate
         m_huidigeLadingId = cargoAttr->value.value_string.value;
         m_actief = true;
         m_ritStartMoment = std::chrono::steady_clock::now();
@@ -560,19 +1016,16 @@ namespace Ritten
         m_gepauzeerd = false;
         m_totaalGepauzeerdSeconden = 0.0;
         m_kmVenster.clear();
-        // Ook het verbruikvenster: StartNieuweRit hieronder zet de literteller
-        // terug op nul, dus oude punten in het venster zouden een negatief
-        // verschil geven.
-        m_brandstofVenster.clear();
+
+        // ONLY the trip counter to zero. The consumption measurement itself
+        // -- the window, the smoothed values, the last reading -- keeps
+        // running: it runs on FuelCosts' session counter and belongs to the
+        // truck, not the trip. This used to wipe everything, so idle and
+        // instantaneous had to rebuild at every trip start while the engine
+        // just kept running.
         m_rijdendLiters = 0.0;
         m_rijdendKm = 0.0;
         m_meetKmTotaal = 0.0;
-        m_vorigMeetLiters = -1.0;
-        m_vorigMeetOdometerKm = -1.0;
-        m_meetGestart = false;
-        m_gladLiterPerUur = -1.0;
-        m_gladVerbruikNu = -1.0;
-        m_vorigRijdt = false;
         m_brandstof.StartNieuweRit();
     }
 
@@ -580,18 +1033,18 @@ namespace Ritten
     {
         SchrijfDebugGameplayEvent( info );
 
-        // "job.delivered" bij een geslaagde levering, "job.cancelled" bij
-        // annuleren. Beide zijn inmiddels geverifieerd tegen de officiele
-        // SDK-constanten (SCS_TELEMETRY_GAMEPLAY_EVENT_job_delivered /
-        // _job_cancelled) -- dit is dus geen aanname meer.
+        // "job.delivered" on a successful delivery, "job.cancelled" on
+        // cancel. Both have now been verified against the official SDK
+        // constants (SCS_TELEMETRY_GAMEPLAY_EVENT_job_delivered /
+        // _job_cancelled) -- so no longer an assumption.
         const std::string eventId = info->id;
 
-        // --- Onkosten tijdens de rit (ideeenlijst #3, #4, #5) ----------
-        // Deze event-id's staan als SCS_TELEMETRY_GAMEPLAY_EVENT_* in de
-        // officiele SDK-header; ik heb ze nagekeken in de publieke
-        // scs-sdk-plugin die precies deze vier afhandelt. Ze komen ook
-        // binnen als je NIET op een job zit (vrij rondrijden) -- dan slaan
-        // we ze over, want ze horen dan bij geen enkele rit.
+        // --- Expenses during the trip (idea list #3, #4, #5) -----------
+        // These event ids are in the official SDK header as
+        // SCS_TELEMETRY_GAMEPLAY_EVENT_*; I checked them in the public
+        // scs-sdk-plugin that handles exactly these four. They also arrive
+        // when you are NOT on a job (free roaming) -- then we skip them,
+        // because they belong to no trip.
         if( eventId == "player.fined" )
         {
             if( !m_actief ) return;
@@ -625,8 +1078,8 @@ namespace Ritten
                 if( attr->value.type == SCS_VALUE_TYPE_s64 )
                     d.bedrag = attr->value.value_s64.value;
             }
-            // Veerboot en trein melden ook waarvandaan en waarnaartoe;
-            // een tolpoort heeft die attributen niet, dan blijven ze leeg.
+            // Ferry and train also report from where and to where; a toll gate
+            // does not have those attributes, then they stay empty.
             if( const scs_named_value_t *attr = ZoekAttribuut( info->attributes, "source.name" ) )
             {
                 if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
@@ -640,7 +1093,7 @@ namespace Ritten
 
             if( d.type == DoorgangType::Veerboot || d.type == DoorgangType::Trein )
             {
-                // De klok springt zo meteen vooruit; dat is geen rust.
+                // The clock is about to jump ahead; that is not rest.
                 m_negeerVolgendeSprong = true;
             }
 
@@ -684,24 +1137,29 @@ namespace Ritten
         m_huidigeRit.brandstofVerbruikLiters = bs.verbruikSindsRitStartLiters;
         m_huidigeRit.brandstofKostenEuro = m_brandstof.SluitRitAf();
 
+        // ETA check: at trip start the first estimate was written, here the
+        // ACTUAL end. That lets you check afterwards whether the arrival time
+        // in real time is right and whether the error grows with distance.
+        Logboek::Schrijf( "eta", std::string( isGeannuleerd ? "trip CANCELLED" : "trip DELIVERED" )
+            + " -- driven=" + std::to_string( m_huidigeRit.afgelegdeAfstandKm ) + " km"
+            + " planned=" + std::to_string( m_huidigeRit.geplandeAfstandKm ) + " km"
+            + " duration=" + std::to_string( VerstrekenMinutenEcht() ) + " min real"
+            + " firstEstimate=" + std::to_string( m_eersteSchattingMinuten ) + " min" );
+
         m_logger.RegisterVoltooideRit( m_huidigeRit );
         m_huidigeRit = Trip{};
         m_huidigeLadingId.clear();
         m_actief = false;
+        m_eersteSchattingMinuten = -1.0;
 
-        // Verbruikmeting opnieuw beginnen: wat hierna volgt is leeg rijden,
-        // en dat hoort een eigen gemiddelde te krijgen in plaats van de rit
-        // die net is afgesloten.
-        m_brandstofVenster.clear();
+        // Only the trip counter to zero; the measurement itself keeps running
+        // (see StartRecord). The average on screen comes from the per-vehicle
+        // counter and no longer from this trip counter, so "give empty driving
+        // afterwards its own average" no longer happens there -- exactly as
+        // the truck's dashboard does not either.
         m_rijdendLiters = 0.0;
         m_rijdendKm = 0.0;
         m_meetKmTotaal = 0.0;
-        m_vorigMeetLiters = -1.0;
-        m_vorigMeetOdometerKm = -1.0;
-        m_meetGestart = false;
-        m_gladLiterPerUur = -1.0;
-        m_gladVerbruikNu = -1.0;
-        m_vorigRijdt = false;
     }
 
     double TruckTracking::VerstrekenMinutenEcht() const
@@ -713,7 +1171,7 @@ namespace Ritten
         double gepauzeerdSeconden = m_totaalGepauzeerdSeconden;
         if( m_gepauzeerd )
         {
-            // we zitten er nu middenin -- ook het lopende stuk meetellen
+            // we are in the middle of it now -- count the running part too
             gepauzeerdSeconden += std::chrono::duration<double>( nu - m_pauzeStartMoment ).count();
         }
 
@@ -728,11 +1186,11 @@ namespace Ritten
             return -1.0;
         }
 
-        // Bij voorkeur: het spel's EIGEN, al-berekende resterende
-        // navigatie-afstand (via truck.navigation.distance, echte weg,
-        // houdt al rekening met bochten) -- veel nauwkeuriger dan onze
-        // eigen optelsom. Alleen gebruiken als het kanaal al minstens één
-        // keer een waarde heeft doorgegeven (-1 = nog niet ontvangen).
+        // Preferably: the game's OWN, already computed remaining navigation
+        // distance (via truck.navigation.distance, real road, already
+        // accounts for bends) -- much more accurate than our own sum. Only
+        // use it once the channel has passed a value at least once (-1 = not
+        // received yet).
         double resterendeKm;
         if( m_navigatieAfstandMeter >= 0.0 )
         {
@@ -740,7 +1198,7 @@ namespace Ritten
         }
         else
         {
-            // Terugval: eigen optelsom (gepland - afgelegd), zoals voorheen.
+            // Fallback: own sum (planned - driven), as before.
             resterendeKm = m_huidigeRit.geplandeAfstandKm - m_huidigeRit.afgelegdeAfstandKm;
         }
 
@@ -749,27 +1207,27 @@ namespace Ritten
             return 0.0;
         }
 
-        // ---- Bron 0: de ETA van het spel zelf --------------------------
+        // ---- Source 0: the game's own ETA -------------------------------
         //
-        // truck.navigation.time is de Route Advisor-schatting -- dezelfde die
-        // onderin je scherm staat. Die kent de echte route, de limieten en de
-        // veerboten, en verandert NIET als je even stilstaat voor een
-        // stoplicht. Precies daarom is dit de enige goede bron.
+        // truck.navigation.time is the Route Advisor estimate -- the same one
+        // at the bottom of your screen. It knows the real route, the limits
+        // and the ferries, and does NOT change when you briefly stop for a
+        // traffic light. That is exactly why it is the only good source.
         //
-        // SCS' eigen header noemt seconden, dus dat is de aanname. Alleen als
-        // die aanname een onmogelijke snelheid oplevert proberen we minuten.
-        // Anders houden we seconden aan -- terugvallen op onze eigen
-        // snelheidsmeting is namelijk erger dan een iets scheve ETA: sta je
-        // stil, dan deelt die door bijna nul en krijg je "42 uur".
+        // SCS' own header says seconds, so that is the assumption. Only if
+        // that assumption yields an impossible speed do we try minutes.
+        // Otherwise we stick to seconds -- falling back on our own speed
+        // reading is worse than a slightly skewed ETA: standing still, it
+        // divides by almost zero and you get "42 hours".
         if( m_navigatieTijd > 0.0 )
         {
             const double schaal = TijdSchaal();
-            double spelUren = m_navigatieTijd / 3600.0; // aanname: seconden
+            double spelUren = m_navigatieTijd / 3600.0;  // assumption: seconds
 
             const double impliciet = spelUren > 0.0 ? resterendeKm / spelUren : 0.0;
             if( impliciet < 3.0 || impliciet > 200.0 )
             {
-                // Onmogelijke snelheid -> waarschijnlijk toch minuten.
+                // Impossible speed -> probably minutes after all.
                 const double alsMinuten = m_navigatieTijd / 60.0;
                 const double implicietMin = alsMinuten > 0.0 ? resterendeKm / alsMinuten : 0.0;
                 if( implicietMin >= 3.0 && implicietMin <= 200.0 )
@@ -783,23 +1241,23 @@ namespace Ritten
 
         double gemiddeldeSnelheid = 0.0;
 
-        // 1) Bij voorkeur: voortschrijdend gemiddelde van de laatste
-        //    ~3 minuten -- reageert snel op wisselende omstandigheden
-        //    (net als Trucky, die continu herberekent i.p.v. één vast
-        //    gemiddelde over de hele rit te gebruiken).
+        // 1) Preferably: moving average of the last ~3 minutes -- reacts
+        //    quickly to changing conditions (like Trucky, which recomputes
+        //    continuously instead of using one fixed average over the whole
+        //    trip).
         if( m_kmVenster.size() >= 2 )
         {
             const auto &eerste = m_kmVenster.front();
             const auto &laatste = m_kmVenster.back();
             double tijdspanneUur = std::chrono::duration<double>( laatste.first - eerste.first ).count() / 3600.0;
             double kmVerschil = laatste.second - eerste.second;
-            if( tijdspanneUur > ( 30.0 / 3600.0 ) ) // minstens 30 sec aan data
+            if( tijdspanneUur > ( 30.0 / 3600.0 ) )  // at least 30 sec of data
             {
                 gemiddeldeSnelheid = kmVerschil / tijdspanneUur;
             }
         }
 
-        // 2) Anders: gemiddelde over de hele rit tot nu toe.
+        // 2) Otherwise: average over the whole trip so far.
         if( gemiddeldeSnelheid < 1.0 )
         {
             double verstrekenMin = VerstrekenMinutenEcht();
@@ -809,61 +1267,72 @@ namespace Ritten
             }
         }
 
-        // 3) Anders: de snelheidsmeter van dit moment.
+        // 3) Otherwise: the speedometer at this moment.
         //
-        // LET OP -- dit was de bron van de rare uitkomsten. De meter geeft
-        // km per SPELuur, terwijl de twee bronnen hierboven km per ECHT uur
-        // geven (afstand gedeeld door verstreken echte tijd). Die door
-        // elkaar halen scheelt een factor 6 in TruckersMP: een ritje van een
-        // kwartier werd dan als anderhalf uur getoond, en een lange rit als
-        // 22 uur. We rekenen de metersnelheid daarom eerst om.
+        // NOTE -- this was the source of the odd results. The speedometer
+        // gives km per GAME hour, while the two sources above give km per
+        // REAL hour (distance divided by elapsed real time). Mixing those up
+        // is off by a factor 6 in TruckersMP: a fifteen-minute hop was shown
+        // as an hour and a half, and a long trip as 22 hours. So we convert
+        // the speedometer speed first.
         if( gemiddeldeSnelheid < 1.0 )
         {
-            // De meter geeft km per SPELuur; omrekenen naar km per ECHT uur.
+            // The speedometer gives km per GAME hour; convert to km per REAL hour.
             gemiddeldeSnelheid = m_huidigeRit.huidigeSnelheidKmh * TijdSchaal();
         }
 
-        // Bodem onder de snelheid. Zonder dit deelt een stilstaande truck
-        // (1 km/h voor een stoplicht) de resterende afstand door bijna nul,
-        // en dan komt er "42 uur" uit -- precies wat er misging. We rekenen
-        // in dat geval met een redelijke reissnelheid in plaats van met het
-        // moment. De ETA van het spel hierboven is sowieso de betere bron;
-        // dit is alleen nog vangnet voor als die er niet is.
-        // Let op de EENHEID: `gemiddeldeSnelheid` is game-km per ECHT uur
-        // (afstand gedeeld door verstreken echte tijd), terwijl 40 km/h een
-        // METERstand is. Omrekenen doe je met de tijdschaal, niet erdoor
-        // delen -- hier stond eerst "* schaal / 6", waardoor de bodem zes keer
-        // te laag lag en een kruipende truck er alsnog doorheen glipte.
-        const double BODEM_SNELHEID_ECHT = 40.0 * TijdSchaal(); // 40 km/h op de meter
+        // Floor under the speed. Without this a truck standing still (1 km/h
+        // at a traffic light) divides the remaining distance by almost zero,
+        // and out comes "42 hours" -- exactly what went wrong. In that case
+        // we reckon with a reasonable travel speed instead of the moment. The
+        // game's ETA above is the better source anyway; this is only a safety
+        // net for when it is missing.
+        // Mind the UNIT: `gemiddeldeSnelheid` is game km per REAL hour
+        // (distance divided by elapsed real time), while 40 km/h is a
+        // SPEEDOMETER reading. You convert with the time scale, not divide by
+        // it -- this used to say "* schaal / 6", so the floor was six times
+        // too low and a crawling truck still slipped through.
+        const double BODEM_SNELHEID_ECHT = 40.0 * TijdSchaal();  // 40 km/h on the speedometer
         if( gemiddeldeSnelheid < BODEM_SNELHEID_ECHT )
         {
             if( m_gladdeSchattingMin > 0.0 )
             {
-                return m_gladdeSchattingMin; // laatst bekende waarde vasthouden
+                return m_gladdeSchattingMin;  // keep the last known value
             }
             gemiddeldeSnelheid = BODEM_SNELHEID_ECHT;
         }
 
-        return Gladstrijken( ( resterendeKm / gemiddeldeSnelheid ) * 60.0 );
+        const double schatting = Gladstrijken( ( resterendeKm / gemiddeldeSnelheid ) * 60.0 );
+
+        // Remember the VERY FIRST usable estimate of this trip. At completion
+        // it is placed next to the actual duration; that shows whether the
+        // error grows with distance.
+        if( m_eersteSchattingMinuten < 0.0 && schatting > 0.0 )
+        {
+            m_eersteSchattingMinuten = schatting;
+            Logboek::Schrijf( "eta", "first estimate: " + std::to_string( schatting )
+                                        + " min real, remaining=" + std::to_string( resterendeKm ) + " km"
+                                        + ", planned=" + std::to_string( m_huidigeRit.geplandeAfstandKm ) + " km" );
+        }
+
+        return schatting;
     }
 
     double TruckTracking::Demp( double huidig, double nieuw, double dtSec, double tauSec )
     {
-        // TIJDgebaseerd, niet per aanroep. Deze functie wordt per frame
-        // aangeroepen -- gemeten zo'n 59 keer per seconde. Met een vast
-        // percentage per aanroep is het gemiddelde binnen een tiende seconde
-        // bijgetrokken en dempt er dus niets. Met dt/(dt+tau) hangt de
-        // demping af van de VERSTREKEN TIJD, en betekent tau hoe lang het
-        // ongeveer duurt voordat een verandering is doorgewerkt.
+        // TIME based, not per call. This function is called per frame --
+        // measured about 59 times a second. With a fixed percentage per call
+        // the average catches up within a tenth of a second and nothing is
+        // damped. With dt/(dt+tau) the damping depends on the ELAPSED TIME,
+        // and tau means roughly how long a change takes to work through.
         if( nieuw < 0.0 ) return huidig;
-        if( huidig < 0.0 ) return nieuw; // eerste meting: gewoon overnemen
+        if( huidig < 0.0 ) return nieuw;  // first reading: just take it
 
-        // Alleen bij een ECHT grote stap direct overnemen. De oude grens
-        // (helft eraf of erbij) sloeg bij bijna elke meting aan: het spel
-        // verbruikt bergop tien keer zoveel als uitrollend, ook bij dezelfde
-        // snelheid (gemeten 30-08). Daardoor werd de demping continu
-        // overgeslagen. Deze ruimere grens laat gewone heuvels dempen en
-        // vangt alleen echte stappen op.
+        // Only take over directly on a REALLY big step. The old limit (half
+        // off or on) fired on almost every reading: the game burns ten times
+        // as much uphill as coasting, even at the same speed (measured 30-08).
+        // So the damping was skipped continuously. This wider limit lets
+        // ordinary hills damp and only catches real steps.
         const double verhouding = nieuw / std::max( 0.001, huidig );
         if( verhouding > 4.0 || verhouding < 0.25 ) return nieuw;
 
@@ -874,18 +1343,18 @@ namespace Ritten
 
     double TruckTracking::Gladstrijken( double ruweMinuten ) const
     {
-        // Zonder dit springt de schatting bij elk stoplicht of elke
-        // inhaalactie heen en weer. We schuiven per aanroep een stukje op
-        // naar de nieuwe waarde in plaats van er meteen naartoe te knallen.
+        // Without this the estimate bounces back and forth at every traffic
+        // light or overtake. Per call we move a little towards the new value
+        // instead of snapping to it.
         if( m_gladdeSchattingMin < 0.0 )
         {
-            m_gladdeSchattingMin = ruweMinuten; // eerste keer: gewoon overnemen
+            m_gladdeSchattingMin = ruweMinuten;  // first time: just take it
         }
         else
         {
-            // Grote sprongen (meer dan de helft eraf of erbij) nemen we wel
-            // direct over -- dan is er echt iets veranderd, bijvoorbeeld een
-            // nieuwe route, en is traag bijsturen juist verwarrend.
+            // Big jumps (more than half off or on) we do take over directly --
+            // then something really changed, for example a new route, and slow
+            // adjustment is only confusing.
             const double verhouding = ruweMinuten / std::max( 1.0, m_gladdeSchattingMin );
             if( verhouding > 1.5 || verhouding < 0.5 )
             {
@@ -899,7 +1368,7 @@ namespace Ritten
         return m_gladdeSchattingMin;
     }
 
-    // ---- Pauze-callbacks --------------------------------------------
+    // ---- Pause callbacks --------------------------------------------
 
     SCSAPI_VOID TruckTracking::GepauzeerdCallback( const scs_event_t, const void *, scs_context_t context )
     {
@@ -908,6 +1377,9 @@ namespace Ritten
         {
             self->m_gepauzeerd = true;
             self->m_pauzeStartMoment = std::chrono::steady_clock::now();
+            // Measurement: does this event fire on TruckersMP in the garage and
+            // the pause menu? The mouse release hangs on it.
+            Logboek::Schrijf( "flags", "SCS reports: paused" );
         }
     }
 
@@ -919,8 +1391,16 @@ namespace Ritten
             auto nu = std::chrono::steady_clock::now();
             self->m_totaalGepauzeerdSeconden += std::chrono::duration<double>( nu - self->m_pauzeStartMoment ).count();
             self->m_gepauzeerd = false;
-            // Voorkom een kunstmatige snelheids-piek in de live-km-integratie
-            // vlak na het hervatten (er zat immers een "gat" in de tijd).
+            Logboek::Schrijf( "flags", "SCS reports: resumed" );
+            // Is a truck waiting for recognition? Then the wait time for the
+            // odometer starts NOW, not in the garage.
+            // MEASURED 04-09: config arrived in the garage (paused), the three
+            // seconds ran out there, and 3 ms after resuming the Scania was
+            // recognised at the Volvo's reading -- the real reading only came
+            // 0.3 s later.
+            if( self->m_huidigVoertuig < 0 ) self->m_configMoment = std::chrono::steady_clock::now();
+            // Prevent an artificial speed spike in the live km integration right
+            // after resuming (there was, after all, a "gap" in time).
             self->m_laatsteSnelheidMeting = nu;
         }
     }
@@ -936,12 +1416,12 @@ namespace Ritten
         const std::string land = value->value_string.value;
         if( land.empty() ) return;
 
-        // Alleen loggen als het VERANDERT, anders loopt debug.log vol.
+        // Only log when it CHANGES, otherwise debug.log fills up.
         static std::string laatst;
         if( land != laatst )
         {
             laatst = land;
-            Logboek::Schrijf( "gebeurt", std::string( "land via '" ) + ( naam ? naam : "?" ) + "': " + land );
+            Logboek::Schrijf( "event", std::string( "country via '" ) + ( naam ? naam : "?" ) + "': " + land );
         }
 
         self->m_brandstof.ZetHuidigLand( land );
@@ -960,8 +1440,8 @@ namespace Ritten
         if( !value ) return;
         auto *self = static_cast<TruckTracking *>( context );
 
-        // Type uitlezen zoals het spel het aanbiedt, niet zoals wij het
-        // dachten: het veld `type` vertelt wat er werkelijk in staat.
+        // Read the type as the game offers it, not as we thought: the `type`
+        // field tells what is really in there.
         double minuten;
         switch( value->type )
         {
@@ -970,16 +1450,16 @@ namespace Ritten
             case SCS_VALUE_TYPE_float: minuten = static_cast<double>( value->value_float.value ); break;
             default: return;
         }
-        if( minuten < 0.0 ) return; // ongeldig / vermoeidheid uit
+        if( minuten < 0.0 ) return;  // invalid / fatigue off
 
-        // Meten wat dit kanaal doet. Springt hij ooit omhoog, dan is er
-        // gerust en kunnen we daarop resetten. Blijft hij alleen maar dalen,
-        // dan gebeurt dat op deze server niet en heeft synchroniseren met de
-        // in-game P-teller sowieso geen zin.
+        // Measure what this channel does. If it ever jumps up, there was rest
+        // and we can reset on it. If it only ever falls, that does not happen
+        // on this server and syncing with the in-game P counter is pointless
+        // anyway.
         if( self->m_minutenTotRust >= 0.0 && minuten > self->m_minutenTotRust + 30.0 )
         {
             ++self->m_rustResets;
-            self->m_pauzeRijSpelMin = 0.0; // teller sprong omhoog = er is gerust
+            self->m_pauzeRijSpelMin = 0.0;  // counter jumped up = there was rest
         }
         if( self->m_rustLaagst < 0.0 || minuten < self->m_rustLaagst )
         {
@@ -987,8 +1467,8 @@ namespace Ritten
         }
 
         self->m_minutenTotRust = minuten;
-        // De hoogste waarde is de lengte van een volle periode. Na een rust
-        // springt de teller weer omhoog, en dan klopt de schaal vanzelf.
+        // The highest value is the length of a full period. After a rest the
+        // counter jumps up again, and then the scale is right by itself.
         if( minuten > self->m_rustPeriodeMax ) self->m_rustPeriodeMax = minuten;
     }
 
@@ -998,38 +1478,51 @@ namespace Ritten
         auto *self = static_cast<TruckTracking *>( context );
         if( !value ) return;
 
+        // Record the thread ID once. Together with the line from OnPostRender
+        // (see Plugin.cxx) this answers whether the SCS callbacks and the
+        // drawing run on DIFFERENT threads. If so, two threads read and write
+        // the same fields in this class without a lock, and synchronisation is
+        // needed. If the two numbers are equal, that does not apply.
+        static bool telemetrieThreadGelogd = false;
+        if( !telemetrieThreadGelogd )
+        {
+            telemetrieThreadGelogd = true;
+            Logboek::Schrijf( "flags", "thread id SCS telemetry callback: "
+                                            + std::to_string( Logboek::HuidigeThreadId() ) );
+        }
+
         const std::uint32_t minuten = value->value_u32.value;
-        if( minuten == self->m_economyTijd ) return; // geen verandering: niets te leren
+        if( minuten == self->m_economyTijd ) return;  // no change: nothing to learn
 
         const auto nu = std::chrono::steady_clock::now();
 
         if( self->m_schaalGestart )
         {
-            // Losse stap beoordelen. Een normale stap is 1 spelminuut per
-            // ~10 echte seconden. Springt de klok ineens veel verder (server
-            // die de tijd synchroniseert, rust, of gepauzeerd gestaan), dan is
-            // die stap onbruikbaar EN vervuilt hij de hele meting -- want het
-            // anker schoof nooit op, dus zo'n sprong bleef eeuwig doorwerken.
-            // Daarom: bij een rare stap opnieuw beginnen met meten.
+            // Assess a single step. A normal step is 1 game minute per ~10 real
+            // seconds. If the clock suddenly jumps much further (server syncing
+            // time, rest, or having been paused), that step is unusable AND
+            // pollutes the whole measurement -- because the anchor never moved,
+            // so such a jump kept having effect forever. Hence: on an odd step,
+            // start measuring again.
             const double stapSpel = static_cast<double>( minuten ) - static_cast<double>( self->m_economyTijd );
 
-            // RUST HERKENNEN. Negen uur stilstaan doe je niet met de motor
-            // stationair -- je slaapt. Voor het spel betekent dat: de klok
-            // springt in een keer uren vooruit terwijl je niet rijdt. Dat is
-            // het enige betrouwbare signaal dat we hebben, want de
-            // Mandatory-Break-teller zelf komt niet door de telemetrie.
+            // RECOGNISE REST. You do not stand still for nine hours with the
+            // engine idling -- you sleep. For the game that means: the clock jumps
+            // hours ahead in one go while you are not driving. That is the only
+            // reliable signal we have, because the Mandatory Break counter itself
+            // does not come through the telemetry.
             //
-            // Drempel op 45 minuten. Sinds 1.60 mag je zelf je wektijd kiezen,
-            // dus een rust kan kort zijn -- op vier uur miste hij die.
+            // Threshold at 45 minutes. Since 1.60 you can choose your own wake
+            // time, so a rest can be short -- at four hours it was missed.
             //
-            // Veerboten en treinen springen ook vooruit, maar die herkennen we
-            // aan hun eigen gameplay-event (zie de onkosten-afhandeling) en
-            // slaan we over via `m_negeerVolgendeSprong`. Dat is preciezer dan
-            // een tijdsdrempel: een veerboot van vijf uur telt zo nog steeds
-            // niet als rust, terwijl een dutje van een uur dat wel doet.
+            // Ferries and trains jump ahead too, but we recognise those by their
+            // own gameplay event (see the expense handling) and skip them via
+            // `m_negeerVolgendeSprong`. That is more precise than a time
+            // threshold: a five-hour ferry still does not count as rest, while a
+            // one-hour nap does.
             if( stapSpel >= 45.0 && self->m_negeerVolgendeSprong )
             {
-                self->m_negeerVolgendeSprong = false; // was de veerboot/trein
+                self->m_negeerVolgendeSprong = false;  // was the ferry/train
             }
             else if( stapSpel >= 45.0 && self->m_liveSnelheidKmh < 2.0 )
             {
@@ -1038,31 +1531,31 @@ namespace Ritten
                 self->m_laatsteRustSpelMinuten = stapSpel;
                 self->m_tachoRijSecondenSindsRust = 0.0;
                 self->m_tachoInRust = true;
-                // Nulpunt vastleggen: vanaf hier telt de spelklok opnieuw.
+                // Set the zero point: from here the game clock counts again.
                 self->m_economyTijdLaatsteRust = minuten;
                 self->m_rustMomentBekend = true;
-                self->m_getoondeRestMin = -1.0;    // rust: mag weer omhoog
+                self->m_getoondeRestMin = -1.0;  // rest: may go up again
 
-                // Voor de EIGEN tachograaf (stand 2 en 3) telt hoe LANG de
-                // sprong was: een korte onderbreking is een pauze, een lange
-                // is dagrust. Zo hoeven we niets te raden over wat je deed.
+                // For the OWN tachograph (modes 2 and 3) it matters HOW LONG the jump
+                // was: a short interruption is a break, a long one is daily rest. So
+                // we need not guess what you did.
                 if( stapSpel >= self->m_tacho.dagRust * 0.8 )
                 {
                     self->m_eigenLaatsteDagrust = minuten;
-                    self->m_eigenLaatstePauze = minuten; // dagrust telt ook als pauze
+                    self->m_eigenLaatstePauze = minuten;  // daily rest also counts as a break
                 }
                 else if( stapSpel >= self->m_tacho.pauzeDuur * 0.9 )
                 {
                     self->m_eigenLaatstePauze = minuten;
                 }
-                self->m_getoondeRijtijdMin = -1.0; // en de rijtijd weer terug naar nul
-                self->BewaarTachoStand();          // meteen vastleggen op schijf
+                self->m_getoondeRijtijdMin = -1.0;  // and the driving time back to zero
+                self->BewaarTachoStand();  // record to disk immediately
             }
             const double stapEcht =
                 std::chrono::duration<double>( nu - self->m_schaalLaatsteEcht ).count() / 60.0;
 
-            const bool rareStap = stapSpel < 0.0 ||          // klok terug
-                                   stapSpel > 5.0 ||          // grote sprong vooruit
+            const bool rareStap = stapSpel < 0.0 ||  // clock back
+                                   stapSpel > 5.0 ||  // big jump ahead
                                    ( stapEcht > 0.0 && ( stapSpel / stapEcht ) > 30.0 );
             if( rareStap )
             {
@@ -1071,8 +1564,8 @@ namespace Ritten
             }
             else
             {
-                // Anker elke 15 minuten verversen, zodat een oude meting niet
-                // eeuwig blijft meewegen als de omstandigheden veranderen.
+                // Refresh the anchor every 15 minutes, so an old reading does not
+                // keep weighing in forever when conditions change.
                 const double sindsAnker =
                     std::chrono::duration<double>( nu - self->m_schaalEersteEcht ).count() / 60.0;
                 if( sindsAnker > 15.0 )
@@ -1095,16 +1588,16 @@ namespace Ritten
 
                 if( self->m_teHerstellenRest >= 0.0 )
                 {
-                    // Er stond een bewaarde stand: verankeren op de klok van NU,
-                    // zodat je exact verder gaat waar je gebleven was -- ook als
-                    // de serverklok ondertussen dagen is doorgelopen.
+                    // There was a saved value: anchor it to the clock of NOW, so you
+                    // continue exactly where you left off -- even if the server clock has
+                    // run on for days meanwhile.
                     self->m_economyTijdLaatsteRust = static_cast<std::uint32_t>(
                         static_cast<double>( minuten ) - ( periode - self->m_teHerstellenRest ) );
                     self->m_teHerstellenRest = -1.0;
                 }
                 else
                 {
-                    // Niets bewaard: dit is ons nulpunt tot er een rust komt.
+                    // Nothing saved: this is our zero point until a rest comes.
                     self->m_economyTijdLaatsteRust = minuten;
                 }
                 self->m_rustMomentBekend = true;
@@ -1116,16 +1609,14 @@ namespace Ritten
                 self->m_eigenLaatsteDagrust = minuten;
                 self->m_eigenGestart = true;
             }
-            // Een bewaarde stand blijft staan, punt. Ook een oude: de teller
-            // hoort gelijk te lopen met je in-game P-klok, en die onthoudt het
-            // ook. Sluit je vandaag af en rijd je morgen verder, dan klopt hij
-            // gewoon nog.
+            // A saved value stays, full stop. Even an old one: the counter should
+            // run in step with your in-game P clock, and that remembers it too.
+            // Quit today and drive on tomorrow, and it is still right.
             //
-            // Laad je een ander profiel waar de klok heel anders staat, dan
-            // neem je zelf even rust om weer gelijk te komen. Dat is de
-            // handicap van het feit dat we de echte P-teller niet kunnen
-            // uitlezen -- en beter dan dat de plugin zelf gaat rommelen in een
-            // stand die misschien juist wel klopt.
+            // Load a different profile where the clock is very different, and you
+            // take a rest yourself to get back in step. That is the handicap of
+            // not being able to read the real P counter -- and better than the
+            // plugin fiddling with a value that may well be correct.
         }
 
         self->m_schaalLaatsteEcht = nu;
@@ -1134,37 +1625,37 @@ namespace Ritten
 
     double TruckTracking::TijdSchaal() const
     {
-        // TruckersMP houdt de klok voor de hele server gelijk en gebruikt
-        // daarvoor een vaste schaal: 1 spelminuut per 10 echte seconden,
-        // oftewel 6 spelminuten per echte minuut. Dat is onze basiswaarde --
-        // en meteen de reden dat we nooit zonder antwoord zitten.
+        // TruckersMP keeps the clock equal for the whole server and uses a
+        // fixed scale for that: 1 game minute per 10 real seconds, i.e. 6
+        // game minutes per real minute. That is our base value -- and at once
+        // the reason we are never without an answer.
         //
-        // We METEN daarnaast, maar puur als correctie voor het geval de
-        // schaal ooit verandert (TMP heeft er in 0.7.5.0 nog aan gezeten) of
-        // je offline speelt, waar het spel wel wisselt tussen snelweg en stad.
+        // We MEASURE as well, but purely as a correction in case the scale
+        // ever changes (TMP touched it in 0.7.5.0) or you play offline, where
+        // the game does switch between motorway and city.
         //
-        // De meting mag de basiswaarde alleen overrulen als ze DICHT IN DE
-        // BUURT ligt. Een tijdsprong door serversynchronisatie of een pauze
-        // levert anders een absurde schaal op, en dan schiet de aankomsttijd
-        // alle kanten op -- precies wat we willen voorkomen.
-        constexpr double STANDAARD_SCHAAL = 6.0;   // TruckersMP: 10 echte sec = 1 spelminuut
-        // Grenzen ruim genoeg voor BEIDE speelwijzen:
-        //   TruckersMP   -> 10 echte seconden per spelminuut  = 6
-        //   Singleplayer -> 1 speluur per ~3,16 echte minuten = ~19
+        // The measurement may only override the base value if it is CLOSE TO
+        // it. A time jump from server sync or a pause otherwise yields an
+        // absurd scale, and then the arrival time flies all over the place --
+        // exactly what we want to prevent.
+        constexpr double STANDAARD_SCHAAL = 6.0;  // TruckersMP: 10 real sec = 1 game minute
+        // Bounds wide enough for BOTH ways of playing:
+        //   TruckersMP   -> 10 real seconds per game minute  = 6
+        //   Singleplayer -> 1 game hour per ~3.16 real minutes = ~19
         //
-        // Ze stonden even op 4..9 om het "flipperen" te dempen, maar daarmee
-        // werd singleplayer (19) verworpen en rekende hij daar met 6 -- een
-        // factor drie mis. Nu de schaal na de meting wordt VASTGEZET is die
-        // demping niet meer nodig: tijdens het rijden beweegt er toch niets.
-        // Alles buiten deze band is een tijdsprong, geen echte schaal.
+        // They were briefly 4..9 to damp the "flipping", but that rejected
+        // singleplayer (19) and reckoned with 6 there -- a factor three off.
+        // Now that the scale is LOCKED after measuring, that damping is no
+        // longer needed: nothing moves while driving anyway. Anything outside
+        // this band is a time jump, not a real scale.
         constexpr double ONDERGRENS = 3.0;
         constexpr double BOVENGRENS = 25.0;
 
-        // Handmatig ingesteld? Dan is dat het, punt.
+        // Set manually? Then that is it, full stop.
         if( m_handmatigeSchaal > 0.0 ) return m_handmatigeSchaal;
 
-        // Eenmaal vastgezet blijft hij vast: tijdens het rijden mag dit getal
-        // niet meer bewegen, anders stuitert de aankomsttijd mee.
+        // Once locked it stays locked: while driving this number must not
+        // move any more, otherwise the arrival time bounces with it.
         if( m_vastgezetteSchaal > 0.0 ) return m_vastgezetteSchaal;
 
         if( !m_schaalGestart ) return STANDAARD_SCHAAL;
@@ -1172,9 +1663,9 @@ namespace Ritten
         const double echteMinuten =
             std::chrono::duration<double>( std::chrono::steady_clock::now() - m_schaalEersteEcht ).count() / 60.0;
 
-        // Onder de twee minuten is de meting te grof: game.time verspringt
-        // met hele minuten tegelijk, dus een enkele stap geeft een schijnbaar
-        // enorme of juist minieme snelheid.
+        // Below two minutes the measurement is too coarse: game.time jumps
+        // in whole minutes, so a single step gives a seemingly huge or tiny
+        // speed.
         if( echteMinuten < 2.0 ) return STANDAARD_SCHAAL;
 
         const double spelMinuten =
@@ -1184,12 +1675,12 @@ namespace Ritten
         const double gemeten = spelMinuten / echteMinuten;
         if( gemeten < ONDERGRENS || gemeten > BOVENGRENS )
         {
-            return STANDAARD_SCHAAL; // meting niet te vertrouwen
+            return STANDAARD_SCHAAL;  // measurement not trustworthy
         }
 
-        // Na vijf minuten schone meting is het genoeg: vastzetten. Vanaf dat
-        // moment is dit net zo stabiel als een hardgecodeerde 6, maar dan wel
-        // met de waarde die deze server werkelijk gebruikt.
+        // After five minutes of clean measurement it is enough: lock. From
+        // that moment this is as stable as a hard-coded 6, but with the value
+        // this server really uses.
         if( echteMinuten >= 5.0 )
         {
             m_vastgezetteSchaal = gemeten;
@@ -1223,9 +1714,9 @@ namespace Ritten
 
     double TruckTracking::MinutenTotVerplichtePauze() const
     {
-        // Rechtstreeks uit de spelklok: hoeveel spelminuten zijn er verstreken
-        // sinds je laatste rust? Dat is precies wat de P-teller in het spel
-        // ook doet -- die telt verstreken tijd, of je nu rijdt of stilstaat.
+        // Straight from the game clock: how many game minutes have passed
+        // since your last rest? That is exactly what the P counter in the game
+        // does too -- it counts elapsed time, whether you drive or stand still.
         if( m_rustMomentBekend )
         {
             const double periodeNu = m_rustPeriodeMax > 60.0 ? m_rustPeriodeMax : MAX_RIJ_SPELMINUTEN;
@@ -1233,56 +1724,53 @@ namespace Ritten
                 static_cast<double>( m_economyTijd ) - static_cast<double>( m_economyTijdLaatsteRust );
             if( verstreken >= 0.0 )
             {
-                // Nooit meer tonen dan een volle periode. Staat de klok lager
-                // dan het bewaarde moment (ander profiel), dan zou je anders
-                // "14 uur" zien staan. De opgeslagen stand blijft ongemoeid --
-                // dit begrenst alleen wat er OP HET SCHERM komt.
+                // Never show more than a full period. If the clock is below the saved
+                // moment (different profile) you would otherwise see "14 hours". The
+                // saved value is left alone -- this only limits what appears ON
+                // SCREEN.
                 const double rest = std::min( periodeNu, periodeNu - verstreken );
 
                 if( m_getoondeRestMin < 0.0 )
                 {
-                    m_getoondeRestMin = rest; // eerste waarde: gewoon overnemen
+                    m_getoondeRestMin = rest;  // first value: just take it
                     BewaarTachoStand();
                     return m_getoondeRestMin;
                 }
 
-                // Twee remmen op het getal, zodat het nooit zichtbaar
-                // schokt door een serversynchronisatie of een ping-piek:
+                // Two brakes on the number, so it never visibly jolts from a server
+                // sync or a ping spike:
                 //
-                // 1. ALLEEN OMLAAG. Springt de klok een minuut terug, dan
-                //    zou de resterende tijd omhoog wippen -- dat ziet eruit
-                //    als een fout. Een aftelteller hoort te dalen.
+                // 1. ONLY DOWN. If the clock jumps back a minute, the remaining time
+                //    would bob up -- that looks like a bug. A countdown should fall.
                 //
-                // 2. ALLEEN IN HELE MINUTEN. We nemen een nieuwe waarde pas
-                //    over als hij minstens een volle minuut lager ligt.
-                //    Kleinere verschillen laten we staan; zo staat het getal
-                //    stil in plaats van heen en weer te trillen.
+                // 2. ONLY IN WHOLE MINUTES. We only take a new value once it is at
+                //    least a full minute lower. Smaller differences we leave; that
+                //    way the number stands still instead of trembling back and forth.
                 //
-                // Bij een echte rust gaat de rem er expliciet af (zie
-                // GameTimeCallback), want dan MOET hij terug omhoog.
+                // On a real rest the brake comes off explicitly (see
+                // GameTimeCallback), because then it MUST go back up.
                 if( rest <= m_getoondeRestMin - 1.0 )
                 {
                     m_getoondeRestMin = rest;
 
-                    // Elke volle minuut wegschrijven. Zo staat de laatste stand
-                    // altijd op schijf, ook als het spel of de plugin er
-                    // onverwacht uit klapt -- er is geen afsluit-moment waar we
-                    // op kunnen rekenen.
+                    // Write every full minute. That way the latest value is always on
+                    // disk, even if the game or the plugin crashes unexpectedly -- there
+                    // is no shutdown moment we can count on.
                     BewaarTachoStand();
                 }
                 return m_getoondeRestMin;
             }
         }
 
-        // De periode NIET hardcoderen. SCS noemt 10 uur voor singleplayer,
-        // maar servers kunnen dat aanpassen -- er zijn meldingen van 11 uur
-        // op TruckersMP. In plaats van te kiezen laten we het spel het zelf
-        // vertellen: de hoogste waarde die het rustkanaal ooit doorgaf IS de
-        // lengte van een volle periode. Zo klopt het op elke server, en ook
-        // als SCS of TMP het morgen weer wijzigt.
+        // Do NOT hard-code the period. SCS says 10 hours for singleplayer,
+        // but servers can change that -- there are reports of 11 hours on
+        // TruckersMP. Instead of choosing we let the game tell us: the highest
+        // value the rest channel ever passed IS the length of a full period.
+        // That way it is right on every server, and also if SCS or TMP change
+        // it again tomorrow.
         //
-        // Zolang dat kanaal niets bruikbaars heeft gegeven, vallen we terug
-        // op de 10 uur uit de SCS-aankondiging.
+        // As long as that channel has given nothing usable, we fall back on
+        // the 10 hours from the SCS announcement.
         const double periode = m_rustPeriodeMax > 60.0 ? m_rustPeriodeMax : MAX_RIJ_SPELMINUTEN;
         return periode - m_pauzeRijSpelMin;
     }
@@ -1294,13 +1782,13 @@ namespace Ritten
 
     double TruckTracking::TachograafRijtijdMinuten() const
     {
-        // Op de SERVERKLOK, niet op echte seconden. In TruckersMP dicteert de
-        // server de speltijd; door het verschil met het moment van je laatste
-        // rust te nemen, loopt deze teller per definitie gelijk met de server
-        // -- ook als je pc even hapert of de plugin een frame overslaat.
+        // On the SERVER CLOCK, not on real seconds. In TruckersMP the server
+        // dictates game time; by taking the difference with the moment of
+        // your last rest, this counter runs in step with the server by
+        // definition -- even if your PC stutters or the plugin skips a frame.
         //
-        // Hier stond een optelsom van echte seconden. Die liep bij de
-        // TMP-tijdschaal zes keer te langzaam en dreef bovendien af.
+        // This used to be a sum of real seconds. At the TMP time scale that
+        // ran six times too slow and drifted as well.
         if( m_rustMomentBekend )
         {
             const double verstreken =
@@ -1311,9 +1799,9 @@ namespace Ritten
                 {
                     m_getoondeRijtijdMin = verstreken;
                 }
-                // Deze teller loopt OP, dus hier alleen omhoog -- en pas als
-                // er een volle minuut bij komt. Zo staat het getal stil in
-                // plaats van te trillen als de serverklok even terugspringt.
+                // This counter counts UP, so here only upwards -- and only once a
+                // full minute is added. That way the number stands still instead of
+                // trembling when the server clock briefly jumps back.
                 else if( verstreken >= m_getoondeRijtijdMin + 1.0 )
                 {
                     m_getoondeRijtijdMin = verstreken;
@@ -1321,7 +1809,7 @@ namespace Ritten
                 return m_getoondeRijtijdMin;
             }
         }
-        return m_tachoRijSecondenSindsRust / 60.0; // terugval tot de klok binnen is
+        return m_tachoRijSecondenSindsRust / 60.0;  // fallback until the clock arrives
     }
 
     void TruckTracking::TachograafUpdate( double snelheidKmh )
@@ -1336,31 +1824,31 @@ namespace Ritten
 
         double verstrekenSeconden = std::chrono::duration<double>( nu - m_tachoLaatsteMeting ).count();
         m_tachoLaatsteMeting = nu;
-        if( verstrekenSeconden <= 0.0 || verstrekenSeconden > 10.0 ) return; // sanity check
+        if( verstrekenSeconden <= 0.0 || verstrekenSeconden > 10.0 ) return;  // sanity check
 
         const double STILSTAND_DREMPEL_KMH = 2.0;
 
-        // Geen tijdsdrempel meer voor stilstand. Die stond eerst op een
-        // minuut (waardoor tanken je rijtijd wiste) en daarna op een volle
-        // rustperiode -- maar zelfs dat was een achterdeurtje. Stilstaan is
-        // geen rust, punt. De enige reset loopt via de tijdsprong.
+        // No more time threshold for standing still. It was first a minute
+        // (so refuelling wiped your driving time) and then a full rest period
+        // -- but even that was a back door. Standing still is not rest, full
+        // stop. The only reset runs via the time jump.
 
-        // De verplichte-pauzeteller wordt NIET meer hier opgeteld. Hij leest
-        // rechtstreeks het verschil tussen de serverklok en het moment van je
-        // laatste rust (zie MinutenTotVerplichtePauze). Dat loopt per definitie
-        // gelijk met TruckersMP: de server dicteert die klok.
+        // The mandatory-break counter is NO LONGER summed here. It reads the
+        // difference between the server clock and the moment of your last
+        // rest directly (see MinutenTotVerplichtePauze). That runs in step
+        // with TruckersMP by definition: the server dictates that clock.
         //
-        // Hier stond een optelsom van echte seconden maal de tijdschaal. Dat
-        // werkte, maar kon afdrijven bij haperingen en hing af van hoe goed we
-        // de schaal hadden gemeten -- allebei onnodig als je de klok gewoon
-        // kunt aflezen.
+        // This used to be a sum of real seconds times the time scale. That
+        // worked, but could drift on stutters and depended on how well we had
+        // measured the scale -- both unnecessary if you can just read the
+        // clock.
 
         if( snelheidKmh < STILSTAND_DREMPEL_KMH )
         {
-            // Alleen bijhouden HOE LANG je stilstaat; dat zet de rijtijd niet
-            // meer op nul. De rust-vlag wordt gezet door de tijdsprong in
-            // GameTimeCallback, want dat is het enige signaal dat een ECHTE
-            // rustactie onderscheidt van gewoon geparkeerd staan.
+            // Only track HOW LONG you stand still; that no longer zeroes the
+            // driving time. The rest flag is set by the time jump in
+            // GameTimeCallback, because that is the only signal that separates a
+            // REAL rest from just being parked.
             m_tachoStilstandSeconden += verstrekenSeconden * TijdSchaal() / 60.0;
         }
         else
@@ -1377,49 +1865,53 @@ namespace Ritten
         auto *self = static_cast<TruckTracking *>( context );
         if( !value ) return;
 
-        double snelheidKmh = value->value_float.value * 3.6; // m/s -> km/h
+        double snelheidKmh = value->value_float.value * 3.6;  // m/s -> km/h
         self->m_liveSnelheidKmh = snelheidKmh;
 
-        // Altijd doorsturen naar de buslijn-tracking, OOK als er geen
-        // vrachtjob actief is (bv. tijdens een buslijn) -- dit kanaal is
-        // niet job-type-specifiek, het is gewoon de snelheid van het
-        // voertuig dat je op dit moment bestuurt.
+        // Always forward to the bus line tracking, EVEN when no cargo job is
+        // active (e.g. during a bus line) -- this channel is not job-type
+        // specific, it is simply the speed of the vehicle you are driving
+        // right now.
         if( self->m_busTracking != nullptr )
         {
             self->m_busTracking->OpLiveSnelheid( snelheidKmh, self->m_gepauzeerd );
-            // De bus heeft geen eigen SCS-registratie; hij krijgt de
-            // navigatiegegevens via deze weg, net als de snelheid.
+            // The bus has no SCS registration of its own; it gets the navigation
+            // data via this route, like the speed.
             self->m_busTracking->ZetNavigatie( self->m_navigatieTijd,
                                                 self->m_navigatieAfstandMeter >= 0.0
                                                     ? self->m_navigatieAfstandMeter / 1000.0
                                                     : -1.0 );
         }
 
-        // Tachograaf loopt altijd door, ongeacht of er een job actief is
-        // (je kan ook "gewoon rondrijden" zonder lading).
+        // Tachograph always keeps running, regardless of whether a job is
+        // active (you can also "just drive around" without cargo).
         if( !self->m_gepauzeerd )
         {
             self->TachograafUpdate( snelheidKmh );
         }
 
-        // --- Verbruikmeting: loopt ALTIJD, ook zonder actieve rit ----------
-        // Bewust boven de "geen rit"-afslag hieronder: de Boordcomputer-tab
-        // is er juist ook voor als je leeg rondrijdt. Tijdens pauze slaan we
-        // over, net als bij de andere metingen: dan zit je in het menu.
+        // --- Consumption measurement: ALWAYS runs, also without an active trip --
+        // Deliberately above the "no trip" exit below: the board computer tab
+        // is there precisely for when you drive around empty. During pause we
+        // skip, like the other measurements: then you are in the menu.
         //
-        // De afstand komt uit SNELHEID x TIJD, niet uit de kilometerstand.
-        // Zo doet het spel het zelf ook: het rekent verbruik uit als liters
-        // per UUR (motorinhoud, toerental, gaspedaal), en l/100km is daar de
-        // afgeleide van -- l/uur gedeeld door km/h. Tijd is een perfecte
-        // noemer, de kilometerstand is dat niet: over een paar seconden is
-        // die te grof, en dat maakte het cijfer zowel te hoog als onrustig.
+        // The distance comes from SPEED x TIME, not from the odometer. That
+        // is how the game itself does it: it computes consumption as litres
+        // per HOUR (displacement, rpm, throttle), and l/100km is derived from
+        // that -- l/h divided by km/h. Time is a perfect denominator, the
+        // odometer is not: over a few seconds it is too coarse, and that made
+        // the figure both too high and restless.
         if( !self->m_gepauzeerd )
         {
             const auto nuMeting = std::chrono::steady_clock::now();
-            const double verbruiktNu = self->m_brandstof.HuidigeState().verbruikSindsRitStartLiters;
+            // The SESSION counter, not the trip counter. It keeps running across
+            // trip boundaries, so this measurement no longer needs to be reset at
+            // trip start and completion. Idle and instantaneous belong to the
+            // truck, not to a trip.
+            const double verbruiktNu = self->m_brandstof.HuidigeState().verbruiktSessieLiters;
 
-            // Vasthouden VOORDAT m_vorigMeetMoment hieronder wordt
-            // overschreven -- de demping verderop heeft deze tijdstap nodig.
+            // Hold on to it BEFORE m_vorigMeetMoment is overwritten below -- the
+            // damping further down needs this time step.
             const auto vorigeMeetMoment = self->m_vorigMeetMoment;
             const bool hadVorigeMeting = self->m_meetGestart;
 
@@ -1429,33 +1921,30 @@ namespace Ritten
                     std::chrono::duration<double>( nuMeting - self->m_vorigMeetMoment ).count() / 3600.0;
                 const double dLiters = verbruiktNu - self->m_vorigMeetLiters;
 
-                // Sanity check tegen rare sprongen, zelfde grens als bij de
-                // ritafstand hierboven.
+                // Sanity check against odd jumps, same limit as for the trip
+                // distance above.
                 if( dtUur > 0.0 && dtUur < 0.1 )
                 {
-                    // GEMETEN 30-08: de kilometerteller van het spel is de
-                    // waarheid, en die liep 3,2x sneller op dan onze eigen
-                    // som "snelheid x tijdschaal x tijd". Reden: de tijdschaal
-                    // (klok, ~6) is NIET dezelfde als de kaartschaal (~19).
-                    // De teller telt echte kilometers, de snelheidsmeter
-                    // hoort bij de verkleinde wereld. In plaats van er weer
-                    // een factor bij te verzinnen nemen we gewoon de teller
-                    // zelf -- die kan per definitie niet verkeerd zijn.
+                    // MEASURED 30-08: the game's odometer is the truth, and it advanced
+                    // 3.2x faster than our own sum "speed x time scale x time". Reason:
+                    // the time scale (clock, ~6) is NOT the same as the map scale (~19).
+                    // The odometer counts real kilometres, the speedometer belongs to the
+                    // shrunken world. Instead of inventing yet another factor we simply
+                    // take the odometer itself -- that cannot be wrong by definition.
                     double dKm = 0.0;
                     if( self->m_vorigMeetOdometerKm >= 0.0 )
                     {
                         const double stap = self->m_kilometerstandKm - self->m_vorigMeetOdometerKm;
-                        // Alleen vooruit, en niet meer dan wat in deze
-                        // tijdstap mogelijk is (vangt teleport/laden af).
+                        // Only forward, and no more than possible in this time step (catches
+                        // teleport/loading).
                         if( stap > 0.0 && stap < 5.0 ) dKm = stap;
                     }
                     self->m_meetKmTotaal += dKm;
 
-                    // Afstandsfactor meten: hoeveel telt de kilometerteller
-                    // per "snelheidsmeter-kilometer"? Alleen bij fatsoenlijke
-                    // snelheid, anders is de deling te onnauwkeurig. Rustig
-                    // bijstellen -- dit is een eigenschap van het spel, geen
-                    // waarde die van moment tot moment hoort te wisselen.
+                    // Measure the distance factor: how much does the odometer count per
+                    // "speedometer kilometre"? Only at decent speed, otherwise the
+                    // division is too imprecise. Adjust gently -- this is a property of
+                    // the game, not a value that should change from moment to moment.
                     if( snelheidKmh >= 25.0 && dKm > 0.0 )
                     {
                         const double meterKm = snelheidKmh * dtUur;
@@ -1468,20 +1957,16 @@ namespace Ritten
                                     Demp( self->m_afstandsFactor, ruweFactor,
                                           dtUur * 3600.0, 10.0 );
 
-                                // Hooguit eens per minuut wegschrijven, en
-                                // alleen als hij echt verschoven is. Elke
-                                // meting opslaan zou onnodig naar schijf
-                                // schrijven terwijl je rijdt.
+                                // Write at most once a minute, and only if it really shifted. Saving
+                                // every reading would write to disk needlessly while you drive.
                                 if( ( self->m_afstandsFactor - self->m_bewaardeFactor ) >  0.2 ||
                                     ( self->m_afstandsFactor - self->m_bewaardeFactor ) < -0.2 )
                                 {
                                     self->m_bewaardeFactor = self->m_afstandsFactor;
                                     try
                                     {
-                                        // Eén getal, meer is het niet. Dit
-                                        // bestand gebruikt verder geen JSON,
-                                        // dus daar ook geen bibliotheek voor
-                                        // binnenhalen.
+                                        // One number, that is all. This file uses no JSON otherwise, so no
+                                        // library for that either.
                                         std::ofstream uit( MetingPad() );
                                         if( uit ) uit << self->m_afstandsFactor;
                                     }
@@ -1491,13 +1976,33 @@ namespace Ritten
                         }
                     }
 
-                    // Negatieve literstappen overslaan: de literteller begint
-                    // opnieuw bij een nieuwe rit.
+                    // Skip negative litre steps: the litre counter starts over at a new
+                    // trip.
                     if( snelheidKmh >= RIJDT_DREMPEL_KMH && dLiters >= 0.0 )
                     {
                         self->m_rijdendLiters += dLiters;
                         self->m_rijdendKm += dKm;
                     }
+
+                    // Per-vehicle counter: ALL litres, including idle, and all kilometres
+                    // -- like the dashboard does. Recognise as soon as brand and odometer
+                    // are both there.
+                    if( self->m_huidigVoertuig < 0 ) self->IdentificeerVoertuig();
+                    if( self->m_huidigVoertuig >= 0 && dLiters >= 0.0 )
+                    {
+                        VoertuigTeller &v = self->m_voertuigen[ self->m_huidigVoertuig ];
+                        v.liters += dLiters;
+                        v.km += dKm;
+                        v.kmStand = self->m_kilometerstandKm;
+                        self->m_voertuigenGewijzigd = true;
+                        self->BewaarVoertuigen( false );
+                    }
+
+                    // Driving style: same reading, four counts added.
+                    self->RijstijlTellen( snelheidKmh, self->m_gaspedaal, dKm, dtUur * 3600.0 );
+
+                    // Is the save thread done? Then take over the counter.
+                    self->VerwerkSaveResultaat();
                 }
             }
             self->m_vorigMeetLiters = verbruiktNu;
@@ -1510,10 +2015,10 @@ namespace Ritten
             m.verbruiktLiters = verbruiktNu;
             m.gemetenKm = self->m_meetKmTotaal;
 
-            // Gas erop of eraf? Dan is alles in het venster achterhaald: je
-            // verbruik verandert NU, maar het venster kijkt terug. Leeggooien
-            // en opnieuw beginnen -- binnen een seconde staat er weer een
-            // cijfer, en dan klopt het bij wat je voet doet.
+            // Throttle on or off? Then everything in the window is stale: your
+            // consumption changes NOW, but the window looks back. Empty it and
+            // start over -- within a second there is a figure again, and then it
+            // matches what your foot does.
             if( self->m_gasOmslag )
             {
                 self->m_gasOmslag = false;
@@ -1528,7 +2033,7 @@ namespace Ritten
                 self->m_brandstofVenster.pop_front();
             }
 
-            // --- Ruw cijfer uit het venster, daarna dempen ------------------
+            // --- Raw figure from the window, then damp ----------------------
             if( self->m_brandstofVenster.size() >= 2 )
             {
                 const auto &eerste = self->m_brandstofVenster.front();
@@ -1538,21 +2043,19 @@ namespace Ritten
                 const double dL = laatste.verbruiktLiters - eerste.verbruiktLiters;
                 const double dKmVenster = laatste.gemetenKm - eerste.gemetenKm;
 
-                // Negatief literverschil = de teller begon opnieuw (nieuwe
-                // rit). Overslaan; het venster is zo weer schoon.
+                // Negative litre difference = the counter started over (new trip).
+                // Skip; the window is clean again right away.
                 if( spanSec > MIN_SPAN_SECONDEN && dL >= 0.0 )
                 {
-                    // TWEE cijfers, elk met een eigen venster:
+                    // TWO figures, each with its own window:
                     //
-                    //  - literPerUurLang hoort BIJ dKmVenster (zelfde punten,
-                    //    zelfde tijdspanne) en gaat naar l/100km. Die twee
-                    //    moeten uit hetzelfde venster komen, anders klopt de
-                    //    deling niet.
-                    //  - literPerUurKort is voor de l/uur-weergave. Daar is
-                    //    geen afstand bij nodig, dus dat kan over een veel
-                    //    korter stukje. Met het lange venster bleef na het
-                    //    stilzetten nog 15 seconden aan rijgegevens meetellen
-                    //    -- gemeten 30-08: "94,1 l/uur" met de motor UIT.
+                    //  - literPerUurLang belongs WITH dKmVenster (same points, same time
+                    //    span) and goes to l/100km. Those two must come from the same
+                    //    window, otherwise the division is off.
+                    //  - literPerUurKort is for the l/h display. No distance needed
+                    //    there, so that can be over a much shorter stretch. With the long
+                    //    window, 15 seconds of driving data kept counting after stopping
+                    //    -- measured 30-08: "94.1 l/h" with the engine OFF.
                     const double literPerUurLang = dL / ( spanSec / 3600.0 );
 
                     double literPerUurKort = literPerUurLang;
@@ -1575,16 +2078,15 @@ namespace Ritten
                         }
                     }
 
-                    // Verstreken tijd sinds de vorige meting. Nodig omdat de
-                    // demping op tijd werkt en niet op het aantal aanroepen
-                    // (dit blok draait per frame, zo'n 59 keer per seconde).
+                    // Elapsed time since the previous reading. Needed because the damping
+                    // works on time and not on the number of calls (this block runs per
+                    // frame, about 59 times a second).
                     const double dempDt = hadVorigeMeting
                         ? std::chrono::duration<double>( nuMeting - vorigeMeetMoment ).count()
                         : 0.0;
 
-                    // Overgang rijden <-> stilstaan: demping overslaan, zodat
-                    // het cijfer meteen omklapt in plaats van er seconden
-                    // over te doen.
+                    // Transition driving <-> standstill: skip the damping, so the figure
+                    // flips right away instead of taking seconds.
                     const bool rijdtNu = ( snelheidKmh >= RIJDT_DREMPEL_KMH );
                     if( rijdtNu != self->m_vorigRijdt )
                     {
@@ -1597,10 +2099,9 @@ namespace Ritten
                                                         dempDt, LUUR_TAU_SECONDEN );
                     }
 
-                    // l/100km alleen bijwerken als je hard genoeg rijdt om
-                    // het zinvol te maken (zie PER100_MIN_KMH). Daaronder
-                    // laten we de laatste waarde met rust; er wordt dan toch
-                    // l/uur getoond.
+                    // Only update l/100km when you drive fast enough to make it
+                    // meaningful (see PER100_MIN_KMH). Below that we leave the last value
+                    // alone; l/h is shown anyway then.
                     const double schaal = self->TijdSchaal();
                     const double gemSnelheid = dKmVenster / ( spanSec / 3600.0 );
                     if( gemSnelheid >= PER100_MIN_KMH * schaal && literPerUurLang > 0.0 )
@@ -1610,19 +2111,21 @@ namespace Ritten
                                                         dempDt, DEMP_TAU_SECONDEN );
                     }
 
-                    // Debugregel, hooguit eens per drie seconden. Hiermee is
-                    // in een ritje terug te zien WELK getal ontspoort, in
-                    // plaats van dat we een theorie moeten verzinnen.
-                    if( std::chrono::duration<double>( nuMeting - self->m_laatsteVerbruikLog ).count() > 3.0 )
+                    // Debug line, at most once every three seconds. With this you can see
+                    // afterwards WHICH number derails, instead of having to invent a
+                    // theory.
+                    if( std::chrono::duration<double>( nuMeting - self->m_laatsteVerbruikLog ).count()
+                            > VerbruikLogInterval() )
                     {
                         self->m_laatsteVerbruikLog = nuMeting;
                         const auto bs = self->m_brandstof.HuidigeState();
                         char regel[ 520 ];
                         std::snprintf( regel, sizeof( regel ),
-                            "meter=%.1f schaal=%.2f span=%.2fs n=%d tank=%.4f teller=%.4f "
+                            "speed=%.1f scale=%.2f span=%.2fs n=%d tank=%.4f counter=%.4f "
                             "dL=%.4f dKm=%.4f luur_kort=%.1f luur_lang=%.1f ruw_per100=%.1f "
-                            "glad_l_per_uur=%.1f glad_per100=%.1f rijdendL=%.3f rijdendKm=%.3f "
-                            "odo=%.3f meetKm=%.3f afstandsfactor=%.2f gas=%.2f",
+                            "smooth_l_per_h=%.1f smooth_per100=%.1f drivingL=%.3f drivingKm=%.3f "
+                            "odo=%.3f meetKm=%.3f afstandsfactor=%.2f gas=%.2f "
+                            "sdk_per100=%.1f sdk_range=%.0f",
                             snelheidKmh, schaal, spanSec,
                             static_cast<int>( self->m_brandstofVenster.size() ),
                             bs.huidigeLiters, bs.verbruikSindsRitStartLiters,
@@ -1632,8 +2135,13 @@ namespace Ritten
                             self->m_gladLiterPerUur, self->m_gladVerbruikNu,
                             self->m_rijdendLiters, self->m_rijdendKm,
                             self->m_kilometerstandKm, self->m_meetKmTotaal, self->m_afstandsFactor,
-                            self->m_gaspedaal );
-                        Logboek::Schrijf( "verbruik", regel );
+                            self->m_gaspedaal,
+                            // What the GAME itself says: its own consumption estimate (l/km, here
+                            // times 100) and the range it derives from it. Measurement of whether
+                            // this channel is populated on TruckersMP and usable as a seed.
+                            ( self->m_verbruikLiterPerKm >= 0.0 ) ? self->m_verbruikLiterPerKm * 100.0 : -1.0,
+                            self->m_bereikKm );
+                        Logboek::Schrijf( "fuel", regel );
                     }
                 }
             }
@@ -1643,28 +2151,27 @@ namespace Ritten
 
         self->m_huidigeRit.huidigeSnelheidKmh = snelheidKmh;
 
-        // Tijdens een pauze (zie GepauzeerdCallback) geen kilometers
-        // "bijverzinnen" en de meetklok niet laten doortikken -- anders
-        // denkt de schatting dat je heel langzaam reed terwijl je gewoon in
-        // het menu zat.
+        // During a pause (see GepauzeerdCallback) do not "invent" kilometres
+        // and do not let the measurement clock tick -- otherwise the estimate
+        // thinks you drove very slowly while you were just in the menu.
         if( self->m_gepauzeerd )
         {
             return;
         }
 
-        // Live "bijgehouden" afstand door snelheid x verstreken tijd op te
-        // tellen sinds de vorige meting -- zie de opmerking bij
-        // m_laatsteSnelheidMeting in TruckTracking.hxx.
+        // Live "tracked" distance by summing speed x elapsed time since the
+        // previous reading -- see the note at m_laatsteSnelheidMeting in
+        // TruckTracking.hxx.
         auto nu = std::chrono::steady_clock::now();
         double verstrekenUur = std::chrono::duration<double>( nu - self->m_laatsteSnelheidMeting ).count() / 3600.0;
-        if( verstrekenUur > 0.0 && verstrekenUur < 0.1 ) // sanity check tegen rare sprongen
+        if( verstrekenUur > 0.0 && verstrekenUur < 0.1 )  // sanity check against odd jumps
         {
             self->m_huidigeRit.afgelegdeAfstandKm += snelheidKmh * verstrekenUur;
         }
         self->m_laatsteSnelheidMeting = nu;
 
-        // Voortschrijdend-gemiddelde-venster bijwerken: nieuw punt toevoegen,
-        // en alles ouder dan VENSTER_SECONDEN weggooien.
+        // Update the moving-average window: add a new point, and discard
+        // everything older than VENSTER_SECONDEN.
         self->m_kmVenster.emplace_back( nu, self->m_huidigeRit.afgelegdeAfstandKm );
         while( !self->m_kmVenster.empty()
                && std::chrono::duration<double>( nu - self->m_kmVenster.front().first ).count() > VENSTER_SECONDEN )
@@ -1679,16 +2186,23 @@ namespace Ritten
         auto *self = static_cast<TruckTracking *>( context );
         if( value )
         {
-            // Kilometerstand meegeven, zodat een tankbeurt weet waar hij was.
+            // Pass the odometer, so a refuelling stop knows where it was.
             self->m_brandstof.ZetKilometerstand( self->m_kilometerstandKm );
+            // Position along, so a refuelling stop knows which country and
+            // whether it is at your own garage. Same fix the radar uses.
+            if( self->m_spelersVoorIncident )
+            {
+                double px = 0.0, pz = 0.0;
+                const bool bekend = self->m_spelersVoorIncident->EigenPositie( px, pz );
+                self->m_brandstof.ZetPositie( px, pz, bekend );
+            }
             self->m_brandstof.ZetLiters( value->value_float.value, self->m_tankInhoudLiters );
-            BrandstofState bs = self->m_brandstof.HuidigeState();
             self->m_huidigeRit.brandstofPercentage =
                 self->m_tankInhoudLiters > 0.0 ? ( value->value_float.value / self->m_tankInhoudLiters ) * 100.0 : 0.0;
 
-            // Debug: eerste keer loggen wat er echt binnenkomt (raw
-            // liters, tankinhoud, berekend percentage) -- zelfde principe
-            // als bij navigation.distance: eerst zien, dan vertrouwen.
+            // Debug: log the first time what really comes in (raw litres, tank
+            // capacity, computed percentage) -- same principle as with
+            // navigation.distance: see first, then trust.
             static bool eersteKeerGelogd = false;
             if( !eersteKeerGelogd )
             {
@@ -1702,7 +2216,7 @@ namespace Ritten
                 std::ofstream uit( pad, std::ios::app );
                 if( uit )
                 {
-                    uit << "[Brandstof] truck.fuel raw waarde: " << value->value_float.value
+                    uit << "[Fuel] truck.fuel raw value: " << value->value_float.value
                         << " liter, tankinhoud (m_tankInhoudLiters): " << self->m_tankInhoudLiters
                         << " liter, berekend percentage: " << self->m_huidigeRit.brandstofPercentage << "%\n";
                 }
@@ -1721,19 +2235,48 @@ namespace Ritten
         self->m_vorigeSchadePercentage = nieuwePercentage;
         self->m_huidigeRit.schadeChassisPercentage = nieuwePercentage;
 
-        // Plotselinge sprong (drempel 1.5 procentpunt in een keer) -->
-        // waarschijnlijk een botsing, meld dit aan de incident-recorder.
-        if( sprong > 1.5 && self->m_incidentRecorder != nullptr )
+        // Skip the VERY FIRST reading. At load the value jumps from zero to
+        // the actual damage of your truck, and that is not a collision. That
+        // was exactly why every session started with an empty incident: the
+        // buffer was still empty and no player had streamed in yet.
+        if( !self->m_schadeGemeten )
         {
+            self->m_schadeGemeten = true;
+            return;
+        }
+
+        // Sudden jump --> probably a collision, report it to the incident
+        // recorder.
+        //
+        // MEASURED 02-09: with the old threshold of 1.5 percentage points it
+        // almost never fired on a real collision. Against a wall the damage
+        // rises GRADUALLY -- half a point per reading while you scrape along
+        // -- and then no single step reaches 1.5. What did get through was
+        // the jump at LOAD, from zero to the actual value. Hence every
+        // recorded incident came from the first twenty seconds and was empty.
+        //
+        // 0.3 does catch a real knock. The ten-second lockout afterwards
+        // prevents a long scrape from making twenty recordings in a row and
+        // immediately overwriting the first (with the run-up in it).
+        constexpr double SCHADE_DREMPEL = 0.3;
+        constexpr double HERHAAL_BLOKKADE_SEC = 10.0;
+        const auto nu = std::chrono::steady_clock::now();
+        const double sindsVorige =
+            std::chrono::duration<double>( nu - self->m_laatsteSchademelding ).count();
+
+        if( sprong > SCHADE_DREMPEL && sindsVorige > HERHAAL_BLOKKADE_SEC
+            && self->m_incidentRecorder != nullptr )
+        {
+            self->m_laatsteSchademelding = nu;
             std::string vermoedelijkeSpeler = "onbekend";
             if( self->m_spelersVoorIncident != nullptr )
             {
                 std::vector<SpelerRecord> spelers = self->m_spelersVoorIncident->GeefSpelers();
                 if( !spelers.empty() )
                 {
-                    // GeefSpelers() sorteert al op afstand, dus de eerste is
-                    // de dichtstbijzijnde -- geen garantie dat dit de dader
-                    // is, wel de meest waarschijnlijke kandidaat.
+                    // GeefSpelers() already sorts by distance, so the first is the
+                    // nearest -- no guarantee this is the culprit, but the most likely
+                    // candidate.
                     vermoedelijkeSpeler = spelers.front().gebruikersnaam
                         + " (TMP-ID " + std::to_string( spelers.front().accountId ) + ")";
                 }
@@ -1750,9 +2293,9 @@ namespace Ritten
 
         double afstandMeter = value->value_float.value;
 
-        // Debug-logregel de EERSTE keer dat dit kanaal een waarde geeft --
-        // net als bij scs_telemetry_init destijds: eerst bevestigen dat het
-        // echt binnenkomt, niet blind vertrouwen.
+        // Debug log line the FIRST time this channel gives a value -- like
+        // with scs_telemetry_init back then: first confirm it really arrives,
+        // do not trust blindly.
         static bool eersteKeerGelogd = false;
         if( !eersteKeerGelogd )
         {
@@ -1766,7 +2309,7 @@ namespace Ritten
             std::ofstream uit( pad, std::ios::app );
             if( uit )
             {
-                uit << "[Navigatie] truck.navigation.distance kanaal ontvangen, eerste waarde: "
+                uit << "[Navigation] truck.navigation.distance channel received, first value: "
                     << afstandMeter << " meter\n";
             }
         }
@@ -1774,13 +2317,13 @@ namespace Ritten
         self->m_navigatieAfstandMeter = afstandMeter;
     }
 
-    // --- Nieuwe kanaal-callbacks --------------------------------------
+    // --- New channel callbacks ----------------------------------------
     //
-    // Allemaal hetzelfde patroon: waarde overnemen, meer niet. Deze draaien
-    // op de game-thread en worden vaak aangeroepen, dus hier gebeurt bewust
-    // geen rekenwerk, geen logging en geen schijf-toegang -- het omrekenen
-    // (m/s naar km/h, 0-1 naar procenten) doen we pas in
-    // HuidigeVoertuigStatus(), dat alleen draait als de overlay open is.
+    // All the same pattern: take the value, nothing more. These run on the
+    // game thread and are called often, so deliberately no computation,
+    // no logging and no disk access here -- the conversion (m/s to km/h,
+    // 0-1 to percent) is done in HuidigeVoertuigStatus(), which only runs
+    // when the overlay is open.
 
     SCSAPI_VOID TruckTracking::BereikCallback( const scs_string_t, scs_u32_t, const scs_value_t *value,
                                                 scs_context_t context )
@@ -1800,18 +2343,44 @@ namespace Ritten
                                                          scs_context_t context )
     {
         if( !value ) return;
-        static_cast<TruckTracking *>( context )->m_kilometerstandKm = value->value_float.value;
+        auto *self = static_cast<TruckTracking *>( context );
+        const double vorige = self->m_kilometerstandKm;
+        self->m_kilometerstandKm = value->value_float.value;
+        // If the reading jumps more than 200 metres BACK, an autosave has been
+        // reloaded. The new reading is exactly that of the loaded save: read
+        // the save again so the counter jumps back with it, like the
+        // dashboard does.
+        if( vorige > 0.0 && self->m_kilometerstandKm < vorige - 0.2 && self->m_huidigVoertuig >= 0 )
+        {
+            Logboek::Schrijf( "event", "odometer jumped back: save reloaded? (waiting 2 s)" );
+            self->m_rijstijlVenster.clear();
+            self->m_rijstijlVensterSom = RijstijlTelling{};
+            self->m_rijstijlPending = RijstijlMeting{};
+            self->m_herlaadKmStand = self->m_kilometerstandKm;
+            self->m_herlaadMoment = std::chrono::steady_clock::now();
+        }
+        // Only when the reading is REALLY different from the one at the truck
+        // switch may the new truck be recognised. The channel arrives every
+        // frame, also with an unchanged value, so "there is a value" says
+        // nothing. MEASURED 03-09: on a switch the configuration came 0.3 s
+        // BEFORE the new odometer, and recognition ran on the previous
+        // truck's.
+        if( !self->m_kmStandVersNaConfig
+            && std::fabs( self->m_kilometerstandKm - self->m_kmStandBijConfig ) > 0.05 )
+        {
+            self->m_kmStandVersNaConfig = true;
+        }
     }
 
     SCSAPI_VOID TruckTracking::SnelheidslimietCallback( const scs_string_t, scs_u32_t, const scs_value_t *value,
                                                           scs_context_t context )
     {
         if( !value ) return;
-        // Het spel stuurt 0 als er geen limiet bekend is (bv. buiten de
-        // route, of als je de Route Advisor-limiet hebt uitgezet). Dat is
-        // iets anders dan "limiet is nul", dus zetten we hem dan terug op
-        // -1 = onbekend, anders zou de overlay "0 km/h" gaan tonen en zou
-        // de te-hard-waarschuwing continu afgaan.
+        // The game sends 0 when no limit is known (e.g. off route, or if you
+        // turned the Route Advisor limit off). That is different from "limit
+        // is zero", so we set it back to -1 = unknown, otherwise the overlay
+        // would show "0 km/h" and the speeding warning would fire
+        // continuously.
         float ruw = value->value_float.value;
         static_cast<TruckTracking *>( context )->m_snelheidslimietMs = ( ruw > 0.1f ) ? ruw : -1.0;
     }
@@ -1830,13 +2399,13 @@ namespace Ritten
         if( !value ) return;
         self->m_gaspedaal = value->value_float.value;
 
-        // Alleen de OMSLAG telt: gas erop of gas eraf. Kleine bewegingen van
-        // je voet moeten het venster niet steeds legen.
+        // Only the FLIP counts: throttle on or off. Small movements of your
+        // foot should not keep emptying the window.
         const bool ingedrukt = ( self->m_gaspedaal > GAS_DREMPEL );
         if( ingedrukt != self->m_gasIngedrukt )
         {
             self->m_gasIngedrukt = ingedrukt;
-            self->m_gasOmslag = true; // wordt in SnelheidCallback afgehandeld
+            self->m_gasOmslag = true;  // handled in SnelheidCallback
         }
     }
 
@@ -1874,9 +2443,8 @@ namespace Ritten
         auto *self = static_cast<TruckTracking *>( context );
         if( !value )
         {
-            // Geen waarde = aanhanger losgekoppeld. Terug naar "onbekend",
-            // anders blijft de laatste schadewaarde van een oude trailer
-            // hangen terwijl je zonder rijdt.
+            // No value = trailer detached. Back to "unknown", otherwise the last
+            // damage value of an old trailer lingers while you drive without.
             self->m_aanhangerSchade = -1.0;
             self->m_heeftAanhanger = false;
             return;
@@ -1903,55 +2471,93 @@ namespace Ritten
     {
         VoertuigStatus s;
         s.bereikKm = m_bereikKm;
-        // Ruw kanaal is liter per km -> omrekenen naar de gebruikelijke
-        // l/100km die je op een echt dashboard ziet.
+        // Raw channel is litres per km -> convert to the usual l/100km you
+        // see on a real dashboard.
         s.verbruikLiterPer100Km = ( m_verbruikLiterPerKm >= 0.0 ) ? m_verbruikLiterPerKm * 100.0 : -1.0;
 
-        // Eigen, betrouwbaardere berekening op basis van het brandstofniveau
-        // (dat IS loepzuiver, zie overdracht) i.p.v. het SCS-kanaal hierboven,
-        // dat een tripcomputer-cijfer van het spel zelf is en niet je
-        // werkelijke rijgedrag weerspiegelt (zie onderzoek 30-08).
+        // Own, more reliable calculation based on the fuel level (which IS
+        // spot on, see handover) instead of the SCS channel above, which is a
+        // trip computer figure of the game itself and does not reflect your
+        // actual driving (see research 30-08).
         //
-        // Het rekenwerk zelf gebeurt in SnelheidCallback, waar de metingen
-        // binnenkomen; hier lezen we alleen de uitkomst. Dat scheelt elk
-        // frame hetzelfde venster opnieuw doorrekenen.
+        // The computation itself happens in SnelheidCallback, where the
+        // readings arrive; here we only read the result. That saves
+        // recomputing the same window every frame.
         {
-            // Onder PER100_MIN_KMH tonen we l/uur: daarboven zegt l/100km
-            // pas iets. "Stationair" alleen als je echt stilstaat.
-            s.echtStil = ( m_liveSnelheidKmh < RIJDT_DREMPEL_KMH );
-            s.staatStil = ( m_liveSnelheidKmh < PER100_MIN_KMH );
+            // Below PER100_MIN_KMH we show l/h: only above it does l/100km mean
+            // anything. "Stationair" only when you really stand still.
+            // ABSOLUTE speed, because reversing gives a NEGATIVE speedometer.
+            // Without fabs, -9.7 km/h read as "less than 0.1" and thus as
+            // standstill: then "stationair" appeared below while you were
+            // shunting. MEASURED 01-09-2026 20:09:29 to 20:09:35, speedometer
+            // -9.7 / -10.9 / -7.2 while uncoupling.
+            const double snelheidAbs = std::fabs( m_liveSnelheidKmh );
+            s.echtStil = ( snelheidAbs < RIJDT_DREMPEL_KMH );
+            s.staatStil = ( snelheidAbs < PER100_MIN_KMH );
 
-            // --- Gemiddelde: alleen wat je RIJDEND verbruikte ---
-            // Stationair draaien telt bewust NIET mee; anders klimt dit cijfer
-            // eindeloos zodra je even stilstaat (gemeten: liep op tot 178).
-            if( m_rijdendKm > 0.005 && m_rijdendLiters > 0.0 )
+            // --- Average: only what you consumed WHILE DRIVING ---
+            // Idling deliberately does NOT count; otherwise this figure climbs
+            // endlessly as soon as you stand still for a bit (measured: rose to
+            // 178).
+            // "gem" comes from the per-VEHICLE counter, no longer from the trip
+            // counter. The dashboard counts since the last reset and then simply
+            // keeps going; so does this counter. Only after five metres, otherwise
+            // you divide by almost zero.
+            if( m_huidigVoertuig >= 0 && m_huidigVoertuig < static_cast<int>( m_voertuigen.size() )
+                && m_voertuigen[ m_huidigVoertuig ].km > 0.005 && m_voertuigen[ m_huidigVoertuig ].liters > 0.0 )
             {
+                const VoertuigTeller &v = m_voertuigen[ m_huidigVoertuig ];
+                s.verbruikGemiddeldLiterPer100Km = v.liters / v.km * 100.0;
+                s.verbruikRitLiterPer100Km = ( m_rijdendKm > 0.005 && m_rijdendLiters > 0.0 )
+                                               ? m_rijdendLiters / m_rijdendKm * 100.0 : -1.0;
+            }
+            else if( m_rijdendKm > 0.005 && m_rijdendLiters > 0.0 )
+            {
+                // Vehicle not recognised yet (no configuration received): then show
+                // something anyway, and that is the trip counter.
                 s.verbruikGemiddeldLiterPer100Km = m_rijdendLiters / m_rijdendKm * 100.0;
+                s.verbruikRitLiterPer100Km = s.verbruikGemiddeldLiterPer100Km;
             }
 
-            // l/uur voor de weergave omrekenen. NIET door de tijdschaal
-            // delen: dat gaf een factor 2 te laag (gemeten 30-08: 8,0 waar
-            // het dashboard 16,9 aangaf, en 1,0 waar het 2,0 aangaf). De
-            // juiste verhouding is die tussen de kilometerteller en de
-            // snelheidsmeter -- dezelfde die het rijdende cijfer goed maakt.
+            // Convert l/h for display with a FIXED divisor.
+            //
+            // MEASURED 01-09-2026 on two very different trucks:
+            //   Scania V8      : glad_l_per_uur 6.0  -> dashboard 2.0  -> 3.00
+            //   DAF MX-11 370  : glad_l_per_uur 4.0  -> dashboard 1.3  -> 3.08
+            //   DAF, full throttle in neutral: ~25.3 -> dashboard 8.4  -> 3.01
+            // Consumption from 4 to 25 litres per REAL hour, two brands, two
+            // engine sizes -- always the same divisor. So this is a game constant
+            // (a time conversion), not an engine property.
+            //
+            // Do NOT derive it from m_afstandsFactor / TijdSchaal(), as it used
+            // to be here. For the same idling DAF, factor 14.76 displayed 1.63,
+            // factor 15.60 displayed 1.50 and factor 22.03 displayed 1.09 --
+            // while the engine burned 4.0 all along. Idling has no distance, so
+            // the map scale does not belong here.
             if( m_gladLiterPerUur >= 0.0 )
             {
-                const double schaal = TijdSchaal();
-                const double deler = ( m_afstandsFactor > 0.0 && schaal > 0.0 )
-                    ? ( m_afstandsFactor / schaal )
-                    : 1.0;
-                s.verbruikLiterPerUur = ( deler > 0.0 ) ? m_gladLiterPerUur / deler : m_gladLiterPerUur;
+                s.verbruikLiterPerUur = m_gladLiterPerUur / LUUR_DELER;
             }
 
             s.verbruikNuLiterPer100Km = m_gladVerbruikNu;
+
+            // Raw counters for the economy line: it compares this trip with your
+            // average in THIS truck, without the trip itself in it.
+            s.ritLiters = m_rijdendLiters;
+            s.ritKm = m_rijdendKm;
+            if( m_huidigVoertuig >= 0 && m_huidigVoertuig < static_cast<int>( m_voertuigen.size() ) )
+            {
+                s.voertuigLiters = m_voertuigen[ m_huidigVoertuig ].liters;
+                s.voertuigKm = m_voertuigen[ m_huidigVoertuig ].km;
+            }
             if( s.verbruikNuLiterPer100Km < 0.0 )
             {
-                s.verbruikNuLiterPer100Km = s.verbruikGemiddeldLiterPer100Km; // terugval
+                s.verbruikNuLiterPer100Km = s.verbruikGemiddeldLiterPer100Km;  // fallback
             }
-            // Geen bovengrens meer hier: het kaartje toont km/l en begrenst
-            // daar op 99,9 km/l. In l/100km afkappen zou juist de
-            // zuinige kant kapotmaken -- uitrollen hoort een HOOG km/l te
-            // geven, en dat komt uit een LAGE l/100km.
+            // No upper bound here any more: the card shows km/l and caps there at
+            // 99.9 km/l. Capping in l/100km would break exactly the economical
+            // side -- coasting should give a HIGH km/l, and that comes from a LOW
+            // l/100km.
         }
 
         s.kilometerstandKm = m_kilometerstandKm;
@@ -1973,8 +2579,8 @@ namespace Ritten
     {
         if( m_snelheidslimietMs < 0.0 ) return false;
         double limietKmh = m_snelheidslimietMs * 3.6;
-        // 3 km/h marge: bij exact op de limiet rijden schommelt de snelheid
-        // altijd een beetje, en dan zou de waarschuwing gaan knipperen.
+        // 3 km/h margin: driving exactly at the limit the speed always
+        // wobbles a bit, and then the warning would flicker.
         return m_liveSnelheidKmh > limietKmh + 3.0;
     }
 
@@ -1984,10 +2590,9 @@ namespace Ritten
         if( !value ) return;
         double schaal = value->value_float.value;
 
-        // Elke ~10 seconden een regel loggen (niet elke frame, dat wordt
-        // te veel) zodat we kunnen zien hoe deze waarde varieert tussen
-        // stad en snelweg, en het kunnen vergelijken met onze eigen
-        // schatting versus de werkelijke verstreken tijd.
+        // Log a line every ~10 seconds (not every frame, that is too much) so
+        // we can see how this value varies between city and motorway, and
+        // compare it with our own estimate versus the actual elapsed time.
         static auto laatsteLog = std::chrono::steady_clock::time_point{};
         auto nu = std::chrono::steady_clock::now();
         if( laatsteLog.time_since_epoch().count() == 0
@@ -2003,7 +2608,7 @@ namespace Ritten
             std::ofstream uit( pad, std::ios::app );
             if( uit )
             {
-                uit << "[LocalScale] huidige waarde: " << schaal << "\n";
+                uit << "[LocalScale] current value: " << schaal << "\n";
             }
         }
     }

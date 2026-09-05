@@ -1,5 +1,7 @@
 #include "IncidentRecorder.hxx"
 
+#include "Logboek.hxx"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
@@ -59,7 +61,7 @@ namespace Ritten
         auto nu = std::chrono::steady_clock::now();
         if( std::chrono::duration<double>( nu - m_laatsteTick ).count() < 1.0 )
         {
-            return; // max 1x per seconde een momentopname bewaren
+            return;  // keep at most one snapshot per second
         }
         m_laatsteTick = nu;
 
@@ -75,10 +77,34 @@ namespace Ritten
 
     void IncidentRecorder::MeldSchade( const std::string &vermoedelijkeSpelerId )
     {
+        // Record WHAT is being frozen. Without this you cannot tell
+        // afterwards whether an empty incident is correct (damage right after
+        // startup, buffer still empty) or whether the filling goes wrong.
+        std::size_t metSpelers = 0, totaalSpelers = 0, metPositie = 0;
+        for( const RingFrame &f : m_buffer )
+        {
+            if( !f.spelers.empty() ) ++metSpelers;
+            totaalSpelers += f.spelers.size();
+            for( const SpelerRecord &s : f.spelers )
+            {
+                if( s.positieBekend ) ++metPositie;
+            }
+        }
+        Logboek::Schrijf( "flags", "incident frozen -- frames="
+            + std::to_string( m_buffer.size() )
+            + " with players=" + std::to_string( metSpelers )
+            + " players total=" + std::to_string( totaalSpelers )
+            + " with position=" + std::to_string( metPositie )
+            // DELIBERATELY only whether there is a suspected player, NOT who.
+            // This line is meant to check that the recording works, and debug.log
+            // gets shared easily -- someone else's name does not need to be in
+            // it. In the overlay itself it is shown.
+            + " suspected=" + ( vermoedelijkeSpelerId.empty() ? "none" : "yes" ) );
+
         if( m_buffer.empty() ) return;
 
-        // Bevries de huidige buffer-inhoud als "het incident" -- overschrijft
-        // een eventueel vorig incident (je wil het meest recente zien).
+        // Freeze the current buffer contents as "the incident" -- overwrites
+        // any previous incident (you want to see the most recent one).
         m_bevrorenIncident.clear();
         auto nu = std::chrono::steady_clock::now();
         for( const RingFrame &f : m_buffer )
@@ -95,6 +121,7 @@ namespace Ritten
             m_bevrorenIncident.push_back( std::move( frame ) );
         }
         m_vermoedelijkeSpelerId = vermoedelijkeSpelerId;
+        ++m_incidentTeller;
     }
 
     const IncidentFrame *IncidentRecorder::GeefFrame( int index ) const

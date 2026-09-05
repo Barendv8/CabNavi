@@ -1,10 +1,10 @@
 #pragma once
 // BusTracking.hxx
 //
-// Volgt buslijn-jobs via TruckersMP::BusModule en zet elke afgeronde/
-// geannuleerde rit om naar een Ritten::Trip die naar de TripLogger gaat.
-// Houdt ook de "live" rit bij zodat de overlay tijdens de rit voortgang kan
-// tonen.
+// Follows bus line jobs via TruckersMP::BusModule and turns every
+// completed/cancelled trip into a Ritten::Trip that goes to the TripLogger.
+// Also keeps the "live" trip so the overlay can show progress during the
+// trip.
 
 #include "TripLogger.hxx"
 #include "TripTypes.hxx"
@@ -24,75 +24,73 @@ namespace Ritten
     public:
         BusTracking( TruckersMP::Session &session, TripLogger &logger );
 
-        // Door de telemetry-callback aan te roepen zodra het "game.time"
-        // kanaal verandert (zie Plugin.cxx / TruckTracking.cxx).
+        // To be called by the telemetry callback as soon as the "game.time"
+        // channel changes (see Plugin.cxx / TruckTracking.cxx).
         void ZetEconomyTijd( std::uint32_t minuten );
 
-        // Door TruckTracking aangeroepen bij elke live snelheidsmeting (het
-        // "truck.speed"-kanaal is niet job-type-specifiek -- hetzelfde
-        // voertuig, dus dezelfde snelheid, of je nu vracht of een buslijn
-        // rijdt). Zo kan de buslijn-tracking dezelfde betrouwbare IRL-
-        // tijdschatting doen als vracht, zonder zelf telemetrie te hoeven
-        // registreren.
+        // Called by TruckTracking on every live speed reading (the
+        // "truck.speed" channel is not job-type specific -- same vehicle, so
+        // same speed, whether you drive cargo or a bus line). That lets the
+        // bus line tracking do the same reliable IRL time estimate as cargo,
+        // without registering telemetry itself.
         void OpLiveSnelheid( double snelheidKmh, bool gepauzeerd );
 
-        // Navigatiegegevens van het spel, doorgegeven vanuit TruckTracking
-        // (die registreert de SCS-kanalen; de bus heeft er geen eigen).
-        // `navTijdRuw` is de waarde van truck.navigation.time zoals het spel
-        // hem geeft, `navAfstandKm` de resterende route-afstand.
+        // Navigation data from the game, passed on from TruckTracking (which
+        // registers the SCS channels; the bus has none of its own).
+        // `navTijdRuw` is the value of truck.navigation.time as the game gives
+        // it, `navAfstandKm` the remaining route distance.
         void ZetNavigatie( double navTijdRuw, double navAfstandKm );
 
-        // Voor de overlay: is er nu een actieve buslijn-rit, en zo ja, welke.
-        // LET OP: dit kijkt bewust naar een eigen 'm_actief'-vlag, niet naar
-        // m_huidigeRit.status -- een default-geconstrueerde Trip heeft
-        // status == Bezig, dus die vergelijking zou een niet-bestaande rit
-        // ten onrechte als actief laten zien.
+        // For the overlay: is there an active bus line trip right now, and if
+        // so, which. NOTE: this deliberately looks at its own 'm_actief' flag,
+        // not at m_huidigeRit.status -- a default-constructed Trip has status
+        // == Bezig, so that comparison would wrongly show a non-existent trip
+        // as active.
         bool HeeftActieveRit() const { return m_actief; }
         const Trip &HuidigeRit() const { return m_huidigeRit; }
 
-        // Echte (klok)tijd sinds ritstart, pauze-bewust (telt niet door
-        // tijdens een pauze -- zie GepauzeerdCallback-patroon in
-        // TruckTracking, hier ontvangen we die status via OpLiveSnelheid).
+        // Real (clock) time since trip start, pause-aware (does not run
+        // during a pause -- see the GepauzeerdCallback pattern in
+        // TruckTracking; here we receive that status via OpLiveSnelheid).
         double VerstrekenMinutenEcht() const;
 
-        // Geschatte resterende IRL-tijd tot de eerstvolgende niet-voltooide
-        // halte, op basis van je voortschrijdend-gemiddelde snelheid.
-        // -1.0 = nog niet te schatten (te weinig data, of geen actieve rit).
+        // Estimated remaining IRL time to the next uncompleted stop, based on
+        // your moving-average speed.
+        // -1.0 = not yet estimable (too little data, or no active trip).
         double GeschatteResterendeMinutenEcht() const;
 
-        // Geschatte ECHTE minuten tot halte `index`, op dezelfde manier
-        // gerekend als de tijd tot de eerstvolgende halte: die schatting is
-        // het vertrekpunt, en de extra afstand daarna wordt met dezelfde
-        // reissnelheid omgerekend.
+        // Estimated REAL minutes to stop `index`, computed the same way as
+        // the time to the next stop: that estimate is the starting point, and
+        // the extra distance after it is converted with the same travel speed.
         //
-        // -1.0 = niet te bepalen (halte al voltooid, of geen afstandsgegevens).
+        // -1.0 = not determinable (stop already completed, or no distance data).
         double GeschatteMinutenTotHalte( std::size_t index ) const;
 
-        // --- Te laat komen (TMP 0.7.5.0 introduceerde een boete) ---------
+        // --- Being late (TMP 0.7.5.0 introduced a penalty) ---------------
         //
-        // De boete werkt zo: alleen de LAATSTE halte telt, de eerste 60
-        // minuten vertraging zijn gratis, en daarboven kost elke minuut
-        // 0,333% van de uitbetaling -- na ruim 6 uur hou je niets over.
+        // The penalty works like this: only the LAST stop counts, the first 60
+        // minutes of delay are free, and above that every minute costs 0.333%
+        // of the payout -- after a good 6 hours you keep nothing.
         //
-        // Om te weten of je te laat komt moeten we twee klokken vergelijken:
-        // de deadline staat in ECONOMY-minuten (speltijd), onze aankomst-
-        // schatting in ECHTE minuten. De verhouding daartussen leiden we af
-        // uit hoe snel de speltijd loopt (zie TijdSchaal()), in plaats van
-        // een vaste factor aan te nemen -- TruckersMP heeft die schaal in
-        // 0.7.5.0 nog aangepast, dus een constante zou meteen verouderen.
+        // To know whether you are late we have to compare two clocks: the
+        // deadline is in ECONOMY minutes (game time), our arrival estimate in
+        // REAL minutes. The ratio between them is derived from how fast game
+        // time runs (see TijdSchaal()), instead of assuming a fixed factor --
+        // TruckersMP changed that scale again in 0.7.5.0, so a constant would
+        // be outdated right away.
         //
-        // Geeft het aantal economy-minuten dat je TE LAAT verwacht te zijn
-        // bij de laatste halte. Negatief betekent dat je voorligt op schema.
-        // -1e9 = niet te bepalen (geen actieve rit, of navigatiedata nog
-        // niet klaar).
+        // Returns the number of economy minutes you expect to be LATE at the
+        // last stop. Negative means you are ahead of schedule.
+        // -1e9 = not determinable (no active trip, or navigation data not
+        // ready yet).
         double GeschatteVertragingMinuten() const;
 
-        // Hoeveel procent van de uitbetaling je bij de huidige vertraging
-        // kwijtraakt (0..100). 0 zolang je binnen het uur speling blijft.
+        // What percentage of the payout you lose at the current delay
+        // (0..100). 0 as long as you stay within the hour of slack.
         double GeschatteBoetePercentage() const;
 
-        // Economy-minuten per echte minuut, afgeleid uit de waarnemingen.
-        // 0 zolang er nog te weinig gemeten is.
+        // Economy minutes per real minute, derived from observations.
+        // 0 while too little has been measured.
         double TijdSchaal() const;
 
     private:
@@ -104,51 +102,56 @@ namespace Ritten
         bool m_actief = false;
         std::uint32_t m_economyTijd = 0;
 
-        // --- Meting van de tijdschaal ------------------------------------
-        // game.time ververst maar eens per economy-minuut (staat zo in de
-        // docs), dus meten we over een langer venster: we onthouden het
-        // eerste moment waarop we een verandering zagen, en vergelijken dat
-        // met het laatste. Zo middelen we die schokkerigheid weg.
+        // --- Measuring the time scale -------------------------------------
+        // game.time only refreshes once per economy minute (per the docs), so
+        // we measure over a longer window: we remember the first moment we
+        // saw a change and compare it with the last. That averages out the
+        // jerkiness.
         std::uint32_t m_schaalEersteEconomy = 0;
         std::chrono::steady_clock::time_point m_schaalEersteEcht{};
         bool m_schaalGestart = false;
-        // Zie TruckTracking: eenmaal betrouwbaar gemeten zetten we de
-        // schaal vast, zodat hij tijdens het rijden niet meer beweegt.
+        // See TruckTracking: once reliably measured we lock the scale, so it
+        // no longer moves while driving.
         mutable double m_vastgezetteSchaal = 0.0;
         std::chrono::steady_clock::time_point m_ritStartMoment;
 
-        // Pauze-tracking (zelfde principe als TruckTracking, maar hier
-        // ontvangen via OpLiveSnelheid i.p.v. eigen SCS-registratie).
+        // Pause tracking (same principle as TruckTracking, but here received
+        // via OpLiveSnelheid instead of our own SCS registration).
         bool m_gepauzeerd = false;
         std::chrono::steady_clock::time_point m_pauzeStartMoment;
         double m_totaalGepauzeerdSeconden = 0.0;
 
-        // Voortschrijdend gemiddelde van de laatste ~3 minuten snelheid.
+        // Moving average of the last ~3 minutes of speed.
         std::deque<std::pair<std::chrono::steady_clock::time_point, double>> m_snelheidVenster;
 
-        // --- Eigen kopie van de aankomsttijd-opzet --------------------------
-        // Bewust apart van TruckTracking: dezelfde constructie, maar een eigen
-        // exemplaar, zodat sleutelen aan de bus de vrachtrit niet raakt.
+        // --- Own copy of the arrival-time setup ------------------------------
+        // Deliberately separate from TruckTracking: same construction, but its
+        // own instance, so tinkering with the bus does not touch the cargo trip.
         double m_navTijdRuw = -1.0;
         double m_navAfstandKm = -1.0;
         mutable double m_gladdeSchattingMin = -1.0;
         double Gladstrijken( double ruweMinuten ) const;
 
-        // Effectieve reissnelheid in km per ECHT uur. Losse functie zodat de
-        // schatting per halte dezelfde snelheid gebruikt als de schatting tot
-        // de eerstvolgende halte -- zonder dat ik aan die bestaande functie
-        // hoef te komen.
+        // Effective travel speed in km per REAL hour. Separate function so the
+        // per-stop estimate uses the same speed as the estimate to the next
+        // stop -- without me having to touch that existing function.
         double EffectieveSnelheidEcht() const;
         static constexpr double VENSTER_SECONDEN = 180.0;
 
-        // Live afstand sinds de laatste AFGERONDE halte (via snelheid x
-        // verstreken tijd, net als bij vracht) -- nodig omdat
-        // m_huidigeRit.afgelegdeAfstandKm alleen bijwerkt ZODRA een halte
-        // officieel voltooid wordt (via het spel-event). Zonder dit dacht
-        // de resterende-tijd-schatting dat je nog de HELE laatste etappe
-        // moest rijden, ook al was je er bijna -- de teller sprong pas bij
-        // aankomst zelf bij, niet er onderweg naartoe.
+        // Live distance since the last COMPLETED stop (via speed x elapsed
+        // time, like cargo) -- needed because m_huidigeRit.afgelegdeAfstandKm
+        // only updates ONCE a stop is officially completed (via the game
+        // event). Without this the remaining-time estimate thought you still
+        // had to drive the WHOLE last leg, even when you were almost there --
+        // the counter only caught up at arrival itself, not on the way.
         double m_liveKmSindsLaatsteHalte = 0.0;
         std::chrono::steady_clock::time_point m_laatsteSnelheidMeting;
+
+        // When did we last write the per-stop prediction?
+        std::chrono::steady_clock::time_point m_laatsteHalteLog{};
+
+        // How often that line may appear. Ten seconds is enough to follow a
+        // bus trip; shorter only makes the log unreadable.
+        static constexpr double LOG_INTERVAL_SECONDEN = 10.0;
     };
 }

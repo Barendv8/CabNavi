@@ -1,28 +1,28 @@
 #pragma once
 // CallbackHulp.hxx
 //
-// Kleine helper om SDK-callbacks te beschermen tegen ontsnappende excepties.
+// Small helper to protect SDK callbacks against escaping exceptions.
 //
-// De SDK-docs zijn hier expliciet over (Events -> Delivery guarantees):
+// The SDK docs are explicit about this (Events -> Delivery guarantees):
 //
 //     "Exceptions must not escape your callback. The SDK contains guard
 //      rails, but an exception that leaves your handler is a bug in your
 //      plugin. Catch your own exceptions and log them."
 //
-// Onze callbacks doen dingen die WEL kunnen gooien: JSON serialiseren
-// (nlohmann::json gooit bij rare waarden), naar schijf schrijven, en
-// std::string/std::vector-allocaties. Zonder vangnet belandt zo'n exceptie
-// midden in de frame-afhandeling van de client.
+// Our callbacks do things that CAN throw: JSON serialisation
+// (nlohmann::json throws on odd values), writing to disk, and
+// std::string/std::vector allocations. Without a safety net such an
+// exception lands in the middle of the client's frame handling.
 //
-// Gebruik:
+// Usage:
 //
 //     module.OnIets.Register( Beschermd( "OnIets", [ this ]( SomeEvent &e )
 //     {
 //         ...
 //     } ) );
 //
-// De naam is puur voor de logregel, zodat je in debug.log ziet welke
-// callback het was.
+// The name is purely for the log line, so debug.log shows which
+// callback it was.
 
 #include "Logboek.hxx"
 
@@ -32,9 +32,9 @@
 
 namespace Ritten
 {
-    // Wordt geimplementeerd in Plugin.cxx: schrijft naar de TruckersMP-
-    // clientlog via Core().LogMessage, zodat de melding terechtkomt waar
-    // gebruikers en het TMP-team toch al kijken (aanbeveling uit de docs).
+    // Implemented in Plugin.cxx: writes to the TruckersMP client log via
+    // Core().LogMessage, so the message ends up where users and the TMP
+    // team already look (recommendation from the docs).
     void LogPluginFout( const std::string &bericht );
 
     template <typename Functie>
@@ -49,17 +49,17 @@ namespace Ritten
             catch( const std::exception &ex )
             {
                 const std::string melding =
-                    std::string( "Exceptie in " ) + naam + ": " + ex.what()
-                    + " | laatste plek: " + Logboek::LaatstBekend();
-                Logboek::Schrijf( "FOUT", melding );
+                    std::string( "Exception in " ) + naam + ": " + Logboek::KorteFout( ex.what() )
+                    + " | last location: " + Logboek::LaatstBekend();
+                Logboek::Schrijf( "ERROR", melding );
                 LogPluginFout( melding );
             }
             catch( ... )
             {
                 const std::string melding =
                     std::string( "Onbekende exceptie in " ) + naam
-                    + " | laatste plek: " + Logboek::LaatstBekend();
-                Logboek::Schrijf( "FOUT", melding );
+                    + " | last location: " + Logboek::LaatstBekend();
+                Logboek::Schrijf( "ERROR", melding );
                 LogPluginFout( melding );
             }
         };
