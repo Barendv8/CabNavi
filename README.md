@@ -268,8 +268,25 @@ These are not bugs; the data simply is not available:
 
 ## Contributing
 
-Issues and pull requests are welcome. The source comments are in Dutch; the
-interface is available in both Dutch and English.
+Issues and pull requests are welcome. The interface is available in both
+Dutch and English.
+
+The source comments and the debug log are in English. Identifiers (classes,
+functions, variables) are in Dutch, because that is how the project grew and
+renaming them would only risk breaking something that works. A short glossary
+covers most of what you will meet:
+
+| Dutch | English | | Dutch | English |
+|---|---|---|---|---|
+| rit, ritten | trip(s) | | verbruik | consumption |
+| brandstof | fuel | | tankbeurt | refuelling stop |
+| snelheid | speed | | kilometerstand / kmStand | odometer |
+| voertuig | vehicle | | halte | (bus) stop |
+| spelers | players | | teller | counter |
+| glad | smoothed | | meting | measurement |
+| instellingen | settings | | uiterlijk | appearance |
+| kaart | map | | land | country |
+| bewaren / laden | save / load | | teken(en) | draw |
 
 ## ⚖️ Legal disclaimer
 
