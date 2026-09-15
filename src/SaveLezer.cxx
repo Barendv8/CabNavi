@@ -1,4 +1,5 @@
 #include "SaveLezer.hxx"
+#include "Spel.hxx"
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +22,8 @@ namespace Ritten
         std::vector<std::filesystem::path> uit;
         PWSTR doc = nullptr;
         if( SHGetKnownFolderPath( FOLDERID_Documents, 0, nullptr, &doc ) != S_OK || !doc ) return uit;
-        const std::filesystem::path basis = std::filesystem::path( doc ) / L"Euro Truck Simulator 2" / L"profiles";
+        const std::filesystem::path basis = std::filesystem::path( doc )
+            / ( SpelInfo::IsAts() ? L"American Truck Simulator" : L"Euro Truck Simulator 2" ) / L"profiles";
         CoTaskMemFree( doc );
         std::error_code ec;
         if( !std::filesystem::is_directory( basis, ec ) ) return uit;

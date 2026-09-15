@@ -1,4 +1,5 @@
 #include "TripLogger.hxx"
+#include "Spel.hxx"
 
 #include <nlohmann/json.hpp>
 
@@ -118,7 +119,12 @@ namespace Ritten
         basis /= "CabNavi";
         std::error_code ec;
         std::filesystem::create_directories( basis, ec );
-        return basis / "trips.jsonl";
+        // ETS2 keeps the historic file, ATS logs beside it -- approved by
+        // Jojo 14-09, same reasoning as meting_ats.txt: one file name per
+        // game and the totals, the history tab and the statistics stay
+        // per game without touching a single line of the counting itself.
+        // EUR and USD never end up in one sum this way.
+        return basis / ( SpelInfo::IsAts() ? "trips_ats.jsonl" : "trips.jsonl" );
     }
 
     // ---- lifecycle ----------------------------------------------------

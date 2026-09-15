@@ -1,5 +1,6 @@
 #include "Overlay.hxx"
 #include "Kaartdata.hxx"
+#include "Eenheden.hxx"
 
 #include "BoeteTekst.hxx"
 #include "Logboek.hxx"
@@ -283,12 +284,13 @@ namespace Ritten
 
     Overlay::Overlay( TripLogger &logger, BusTracking &bus, TruckTracking &vracht,
                        PlayersNearby &spelers, FuelCosts &brandstof, DiscordWebhook &discord,
-                       IncidentRecorder &incident )
+                       VtcWebhook &vtc, IncidentRecorder &incident )
         : m_logger( logger ), m_bus( bus ), m_vracht( vracht ), m_spelers( spelers ), m_brandstof( brandstof ),
-          m_discord( discord ), m_incident( incident )
+          m_discord( discord ), m_vtc( vtc ), m_incident( incident )
     {
-        std::snprintf( m_prijsBuffer, sizeof( m_prijsBuffer ), "%.2f", m_brandstof.PrijsPerLiter() );
         LaadUiterlijk();
+        std::snprintf( m_prijsBuffer, sizeof( m_prijsBuffer ), "%.2f",
+                        Eenheden::PrijsPerVolume( m_brandstof.PrijsPerLiter() ) );
         LaadVtcInstellingen();
 
         // Both network switches default ON and are remembered in uiterlijk.json
@@ -299,7 +301,7 @@ namespace Ritten
         // (newest wins), then look for a newer one if the switch is on.
         {
             std::string fout;
-            const auto cache = InstellingenMap() / "kaartdata.json";
+            const auto cache = InstellingenMap() / Kaartdata::CacheBestandsnaam();
             std::error_code ec;
             if( std::filesystem::exists( cache, ec ) && !Kaartdata::LaadBestand( cache, fout ) )
                 Logboek::Schrijf( "start", "map table cache: " + fout );
@@ -345,6 +347,8 @@ namespace Ritten
             m_iconenDoorzichtigheid = j.value( "iconen_doorzichtigheid", m_iconenDoorzichtigheid );
             m_zuinigheidTonen = j.value( "zuinigheid_tonen", true );
             m_taal = j.value( "taal", 0 );
+            m_eenheden = std::clamp( j.value( "eenheden", 0 ), 0, 2 );
+            Eenheden::Keuze() = static_cast<EenheidKeuze>( m_eenheden );
             m_klokTonen = j.value( "klok_tonen", true );
             m_uitgebreidLog = j.value( "uitgebreid_log", false );
             Logboek::Uitgebreid() = m_uitgebreidLog;
@@ -370,6 +374,7 @@ namespace Ritten
         j[ "iconen_doorzichtigheid" ] = m_iconenDoorzichtigheid;
         j[ "zuinigheid_tonen" ] = m_zuinigheidTonen;
         j[ "taal" ] = m_taal;
+        j[ "eenheden" ] = m_eenheden;
         j[ "klok_tonen" ] = m_klokTonen;
         j[ "uitgebreid_log" ] = m_uitgebreidLog;
         j[ "web_api_aan" ] = m_webApiAan;
@@ -1456,7 +1461,8 @@ namespace Ritten
                 T( "ONDERWEG" ) );
             ImGui::Text( "%s -> %s", t.bronStad.empty() ? "?" : t.bronStad.c_str(),
                          t.bestemmingStad.empty() ? "?" : t.bestemmingStad.c_str() );
-            ImGui::TextDisabled( T( "%s | %.0f km gepland" ), t.lading.empty() ? "-" : t.lading.c_str(), t.geplandeAfstandKm );
+            ImGui::TextDisabled( Eenheden::Imperiaal() ? T( "%s | %.0f mi gepland" ) : T( "%s | %.0f km gepland" ),
+                                  t.lading.empty() ? "-" : t.lading.c_str(), Eenheden::Km( t.geplandeAfstandKm ) );
             ImGui::EndGroup();
             ImGui::EndChild();
             ImGui::PopStyleColor();
@@ -1475,18 +1481,18 @@ namespace Ritten
             // not read.
             {
                 TruckTracking::VoertuigStatus vs = m_vracht.HuidigeVoertuigStatus();
-                std::string onder = "km/h";
+                std::string onder = Eenheden::Imperiaal() ? "mph" : "km/h";
                 if( vs.snelheidslimietKmh >= 0.0 )
                 {
                     char lang[ 40 ], kort[ 24 ];
-                    snprintf( lang, sizeof( lang ), "km/h - limiet %.0f", vs.snelheidslimietKmh );
-                    snprintf( kort, sizeof( kort ), T( "limiet %.0f" ), vs.snelheidslimietKmh );
+                    snprintf( lang, sizeof( lang ), "%s - limiet %.0f", onder.c_str(), Eenheden::Snelheid( vs.snelheidslimietKmh ) );
+                    snprintf( kort, sizeof( kort ), T( "limiet %.0f" ), Eenheden::Snelheid( vs.snelheidslimietKmh ) );
 
                     const float ruimteKaart = breedte - ImGui::GetStyle().WindowPadding.x * 2.0f;
                     if( ImGui::CalcTextSize( lang ).x <= ruimteKaart )       onder = lang;
                     else if( ImGui::CalcTextSize( kort ).x <= ruimteKaart )  onder = kort;
                 }
-                StatKaart( T( "SNELHEID" ), std::to_string( (int)t.huidigeSnelheidKmh ),
+                StatKaart( T( "SNELHEID" ), std::to_string( (int)Eenheden::Snelheid( t.huidigeSnelheidKmh ) ),
                             breedte, onder.c_str(), m_vracht.RijdtTeHard() );
             }
             // Empty caption instead of no caption: that way these two keep the
@@ -1527,7 +1533,7 @@ namespace Ritten
             ImGui::TextColored( ImVec4( m_accentKleur[ 0 ] + 0.15f, m_accentKleur[ 1 ] + 0.1f, m_accentKleur[ 2 ] + 0.1f, 1.0f ),
                                  T( "BRANDSTOFKOSTEN" ) );
             if( m_kopFont ) ImGui::PushFont( m_kopFont );
-            ImGui::Text( T( "EUR %.2f" ), bs.kostenDezeRitEuro );
+            ImGui::Text( "%s %.2f", SpelInfo::Munt(), bs.kostenDezeRitEuro );
             if( m_kopFont ) ImGui::PopFont();
             ImGui::EndGroup();
             ImGui::EndChild();
@@ -1676,12 +1682,12 @@ namespace Ritten
                 TruckTracking::VoertuigStatus vs = m_vracht.HuidigeVoertuigStatus();
                 float breedte = ( ImGui::GetContentRegionAvail().x - 16 ) / 3.0f;
 
-                std::string onder = "km/h";
+                std::string onder = Eenheden::Imperiaal() ? "mph" : "km/h";
                 if( vs.snelheidslimietKmh >= 0.0 )
                 {
                     char lang[ 40 ], kort[ 24 ];
-                    snprintf( lang, sizeof( lang ), "km/h - limiet %.0f", vs.snelheidslimietKmh );
-                    snprintf( kort, sizeof( kort ), "limiet %.0f", vs.snelheidslimietKmh );
+                    snprintf( lang, sizeof( lang ), "%s - limiet %.0f", Eenheden::Imperiaal() ? "mph" : "km/h", Eenheden::Snelheid( vs.snelheidslimietKmh ) );
+                    snprintf( kort, sizeof( kort ), "limiet %.0f", Eenheden::Snelheid( vs.snelheidslimietKmh ) );
                     const float ruimte = breedte - ImGui::GetStyle().WindowPadding.x * 2.0f;
                     if( ImGui::CalcTextSize( lang ).x <= ruimte )       onder = lang;
                     else if( ImGui::CalcTextSize( kort ).x <= ruimte )  onder = kort;
@@ -1689,7 +1695,7 @@ namespace Ritten
 
                 // Compact form: as low as possible, width untouched. Saves space for
                 // the stop list below.
-                StatKaart( T( "SNELHEID" ), std::to_string( (int)m_vracht.LiveSnelheidKmh() ),
+                StatKaart( T( "SNELHEID" ), std::to_string( (int)Eenheden::Snelheid( m_vracht.LiveSnelheidKmh() ) ),
                             breedte, onder.c_str(), m_vracht.RijdtTeHard(), true );
                 ImGui::SameLine();
                 StatKaart( T( "SCHADE" ), std::to_string( (int)vs.schadeChassis ) + "%", breedte, "", false, true );
@@ -1714,9 +1720,9 @@ namespace Ritten
                                       ImVec2( ImGui::GetStyle().ItemSpacing.x, 2.0f ) );
                 if( cruiseAan )
                 {
-                    TekstSFmt( IM_COL32( 115, 217, 173, 255 ), "%.0f", vs.cruiseControlKmh );
+                    TekstSFmt( IM_COL32( 115, 217, 173, 255 ), "%.0f", Eenheden::Snelheid( vs.cruiseControlKmh ) );
                     if( m_kleinFont ) ImGui::PushFont( m_kleinFont );
-                    TekstGedimd( T( "km/h" ) );
+                    TekstGedimd( Eenheden::Imperiaal() ? "mph" : T( "km/h" ) );
                     if( m_kleinFont ) ImGui::PopFont();
                 }
                 else
@@ -1802,13 +1808,14 @@ namespace Ritten
                 const double naarHalte = m_bus.GeschatteMinutenTotHalte( i );
                 if( naarHalte >= 0.0 )
                 {
-                    ImGui::TextDisabled( T( "%s -- %.0f km -- rond %s" ),
-                                          statusTekst, s.geplandeAfstandKm,
+                    ImGui::TextDisabled( Eenheden::Imperiaal() ? T( "%s -- %.0f mi -- rond %s" ) : T( "%s -- %.0f km -- rond %s" ),
+                                          statusTekst, Eenheden::Km( s.geplandeAfstandKm ),
                                           KlokTijdOver( naarHalte ).c_str() );
                 }
                 else
                 {
-                    ImGui::TextDisabled( T( "%s -- %.0f km vanaf start" ), statusTekst, s.geplandeAfstandKm );
+                    ImGui::TextDisabled( Eenheden::Imperiaal() ? T( "%s -- %.0f mi vanaf start" ) : T( "%s -- %.0f km vanaf start" ),
+                                          statusTekst, Eenheden::Km( s.geplandeAfstandKm ) );
                 }
 
                 // Boarders and alighters, small after the status line. Come straight
@@ -2269,19 +2276,19 @@ namespace Ritten
                 // Caption with the limit, but only as long as it fits. In a narrow
                 // window first "km/h" drops and then the whole limit -- cutting off
                 // halfway does not read.
-                std::string onder = "km/h";
+                std::string onder = Eenheden::Imperiaal() ? "mph" : "km/h";
                 if( vs.snelheidslimietKmh >= 0.0 )
                 {
                     char lang[ 40 ], kort[ 24 ];
-                    snprintf( lang, sizeof( lang ), "km/h - limiet %.0f", vs.snelheidslimietKmh );
-                    snprintf( kort, sizeof( kort ), "limiet %.0f", vs.snelheidslimietKmh );
+                    snprintf( lang, sizeof( lang ), "%s - limiet %.0f", Eenheden::Imperiaal() ? "mph" : "km/h", Eenheden::Snelheid( vs.snelheidslimietKmh ) );
+                    snprintf( kort, sizeof( kort ), "limiet %.0f", Eenheden::Snelheid( vs.snelheidslimietKmh ) );
 
                     const float ruimteKaart = derdeB - ImGui::GetStyle().WindowPadding.x * 2.0f;
                     if( ImGui::CalcTextSize( lang ).x <= ruimteKaart )       onder = lang;
                     else if( ImGui::CalcTextSize( kort ).x <= ruimteKaart )  onder = kort;
                     // otherwise it simply stays "km/h"
                 }
-                StatKaart( T( "SNELHEID" ), std::to_string( (int)m_vracht.LiveSnelheidKmh() ),
+                StatKaart( T( "SNELHEID" ), std::to_string( (int)Eenheden::Snelheid( m_vracht.LiveSnelheidKmh() ) ),
                             derdeB, onder.c_str(), m_vracht.RijdtTeHard() );
                 ImGui::SameLine();
                 // Empty caption instead of no caption: that way this card keeps the
@@ -2309,9 +2316,9 @@ namespace Ritten
                 if( m_kopFont ) ImGui::PushFont( m_kopFont );
                 if( cruiseAan )
                 {
-                    TekstSFmt( IM_COL32( 115, 217, 173, 255 ), "%.0f", vs.cruiseControlKmh );
+                    TekstSFmt( IM_COL32( 115, 217, 173, 255 ), "%.0f", Eenheden::Snelheid( vs.cruiseControlKmh ) );
                     if( m_kopFont ) ImGui::PopFont();
-                    TekstGedimd( T( "km/h" ) );
+                    TekstGedimd( Eenheden::Imperiaal() ? "mph" : T( "km/h" ) );
                 }
                 else
                 {
@@ -2330,7 +2337,8 @@ namespace Ritten
             // not exist while you drive. So in both cases "--" instead of a figure
             // that looks reliable but is not.
             StatKaart( T( "BEREIK" ),
-                        vs.bereikKm > 0.0 ? MetPunten( vs.bereikKm ) : "--", breedte, T( "km te gaan" ) );
+                        vs.bereikKm > 0.0 ? MetPunten( Eenheden::Km( vs.bereikKm ) ) : "--", breedte,
+                        Eenheden::Imperiaal() ? T( "mi te gaan" ) : T( "km te gaan" ) );
             ImGui::SameLine();
             // CONSUMPTION: at low speed l/h (consumption per distance says nothing
             // there), above that km/l -- the same unit as the dashboard in the
@@ -2340,22 +2348,35 @@ namespace Ritten
             auto naarKmPerLiter = []( double literPer100Km ) -> double
             {
                 if( literPer100Km <= 0.0 ) return -1.0;
-                double kmpl = 100.0 / literPer100Km;
-                if( kmpl > 99.9 ) kmpl = 99.9;  // otherwise does not fit in the box
-                return kmpl;
+                return 100.0 / literPer100Km;
+            };
+
+            // The value shown in km/l (ETS2) or mpg (ATS), capped so it fits
+            // the box. The cap sits on the CONVERTED number, not on km/l: a
+            // km/l cap scaled up through the conversion (99.9 km/l -> ~235 mpg,
+            // and worse) -- that is why ATS showed 608 while ETS2 stopped at
+            // 99.9. One real ceiling, expressed per unit.
+            auto verbruikGetoond = []( double kmpl ) -> double
+            {
+                double v = Eenheden::Verbruik( kmpl );          // km/l -> mpg when imperial
+                const double plafond = Eenheden::Imperiaal() ? 235.0 : 99.9;
+                return v > plafond ? plafond : v;
             };
 
             std::string verbruikWaarde = "--";
             std::string verbruikOnder;
             if( vs.staatStil && vs.verbruikLiterPerUur >= 0.0 )
             {
-                verbruikWaarde = getal( vs.verbruikLiterPerUur, "", 1 );
-                verbruikOnder = vs.echtStil ? T( "l/uur - stationair" ) : T( "l/uur" );
+                verbruikWaarde = getal( Eenheden::LitersPerUur( vs.verbruikLiterPerUur ), "", 1 );
+                verbruikOnder = vs.echtStil
+                    ? ( Eenheden::Imperiaal() ? T( "gal/uur - stationair" ) : T( "l/uur - stationair" ) )
+                    : T( Eenheden::PerUurLabel() );
                 // Ladder: if the long caption does not fit in a narrow window, a
                 // shorter form instead of cutting off.
                 const float ruimte = breedte - ImGui::GetStyle().WindowPadding.x * 2.0f;
-                if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = T( "l/uur stat." );
-                if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = T( "l/uur" );
+                if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte )
+                    verbruikOnder = Eenheden::Imperiaal() ? T( "gal/uur stat." ) : T( "l/uur stat." );
+                if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = T( Eenheden::PerUurLabel() );
             }
             else
             {
@@ -2363,26 +2384,26 @@ namespace Ritten
                 const double gemKmpl = naarKmPerLiter( vs.verbruikGemiddeldLiterPer100Km );
                 if( nuKmpl > 0.0 )
                 {
-                    verbruikWaarde = getal( nuKmpl, "", 1 );
+                    verbruikWaarde = getal( verbruikGetoond( nuKmpl ), "", 1 );
                 }
                 if( gemKmpl > 0.0 )
                 {
-                    const std::string gem = getal( gemKmpl, "", 1 );
-                    verbruikOnder = "km/l - gem " + gem;
+                    const std::string gem = getal( verbruikGetoond( gemKmpl ), "", 1 );
+                    verbruikOnder = std::string( Eenheden::VerbruikLabel() ) + " - gem " + gem;
                     const float ruimte = breedte - ImGui::GetStyle().WindowPadding.x * 2.0f;
                     if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = "gem " + gem;
-                    if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = "km/l";
+                    if( ImGui::CalcTextSize( verbruikOnder.c_str() ).x > ruimte ) verbruikOnder = Eenheden::VerbruikLabel();
                 }
                 else
                 {
-                    verbruikOnder = "km/l";
+                    verbruikOnder = Eenheden::VerbruikLabel();
                 }
             }
             StatKaart( T( "VERBRUIK" ), verbruikWaarde, breedte, verbruikOnder.c_str() );
             ImGui::SameLine();
             StatKaart( T( "KM-STAND" ),
-                        vs.kilometerstandKm >= 0.0 ? MetPunten( vs.kilometerstandKm ) : "--",
-                        breedte, T( "km totaal" ) );
+                        vs.kilometerstandKm >= 0.0 ? MetPunten( Eenheden::Km( vs.kilometerstandKm ) ) : "--",
+                        breedte, Eenheden::Imperiaal() ? T( "mi totaal" ) : T( "km totaal" ) );
 
             // --- Refuelling stops this trip ---------------------------
             // The game does not report THAT you refuelled; we recognise it by a
@@ -2413,11 +2434,13 @@ namespace Ritten
                         const float breed = ImGui::GetContentRegionAvail().x;
 
                         char links[ 48 ];
-                        snprintf( links, sizeof( links ), "+%.0f l%s", t.liters, t.garage ? T( " garage" ) : "" );
+                        snprintf( links, sizeof( links ), "+%.0f %s%s", Eenheden::Liters( t.liters ),
+                                   Eenheden::VolumeLabel(), t.garage ? T( " garage" ) : "" );
                         TekstS( links );
 
-                        std::string rechtsTekst = std::string( T( "EUR " ) ) + getal( t.kostenEuro, "", 2 );
-                        if( t.kmStand > 0.0 ) rechtsTekst += T( "   bij " ) + MetPunten( t.kmStand ) + T( " km" );
+                        std::string rechtsTekst = std::string( SpelInfo::Munt() ) + " " + getal( t.kostenEuro, "", 2 );
+                        if( t.kmStand > 0.0 ) rechtsTekst += T( "   bij " ) + MetPunten( Eenheden::Km( t.kmStand ) )
+                                                             + " " + Eenheden::AfstandLabel();
                         const float rb = ImGui::CalcTextSize( rechtsTekst.c_str() ).x;
                         ImGui::SameLine( 0.0f, 0.0f );
                         ImGui::SetCursorPosX( ImGui::GetCursorPosX() +
@@ -2989,7 +3012,7 @@ namespace Ritten
                 // cut off. With player names there is a useful intermediate step,
                 // because they are often full of tags and decoration:
                 //
-                //   "[WEEDA] Barend V8 | NL"  ->  "Barend V8"
+                //   "[VTC] Driver | NL"  ->  "Driver"
                 //
                 // That way you do not lose the name itself, only the decor around it.
                 const float ruimteNaam = breedte - 150.0f;
@@ -3192,7 +3215,7 @@ namespace Ritten
         // screenshot 30-08). Want it different, change this number.
         SectieStart( "UITERLIJK", ImVec4( m_accentKleur[ 0 ] + 0.2f, m_accentKleur[ 1 ] + 0.15f,
                                             m_accentKleur[ 2 ] + 0.1f, 1.0f ),
-                      SectieHoogte( /*tekst*/ 1, /*velden*/ 4 ) );
+                      SectieHoogte( /*tekst*/ 1, /*velden*/ 5 ) );
         // Language choice. Dutch is the base; texts without a translation stay
         // Dutch, so nothing can ever be left empty.
         {
@@ -3206,6 +3229,30 @@ namespace Ritten
                     {
                         m_taal = i;
                         Taal::Kies( i == 1 ? TaalKeuze::Engels : TaalKeuze::Nederlands );
+                        SlaUiterlijkOp();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        // Display units. Automatic follows the game (ETS2 metric, ATS
+        // imperial); the other two force it. Display only -- see Eenheden.hxx.
+        {
+            static const char *keuzes[] = { "Automatisch", "Metrisch (km, liter)", "Imperiaal (mi, gallon)" };
+            ImGui::SetNextItemWidth( VeldBreedte() );
+            if( ImGui::BeginCombo( T( "Eenheden" ), T( keuzes[ std::clamp( m_eenheden, 0, 2 ) ] ) ) )
+            {
+                for( int i = 0; i < 3; ++i )
+                {
+                    if( ImGui::Selectable( T( keuzes[ i ] ), m_eenheden == i ) )
+                    {
+                        m_eenheden = i;
+                        Eenheden::Keuze() = static_cast<EenheidKeuze>( i );
+                        // The price field shows per litre or per gallon; refill
+                        // it so the figure on screen matches the new unit.
+                        std::snprintf( m_prijsBuffer, sizeof( m_prijsBuffer ), "%.2f",
+                                        Eenheden::PrijsPerVolume( m_brandstof.PrijsPerLiter() ) );
                         SlaUiterlijkOp();
                     }
                 }
@@ -3428,8 +3475,8 @@ namespace Ritten
 
                 if( !huidig.empty() )
                 {
-                    TekstGedimdFmt( T( "Uit brandstofprijzen.json: EUR %.2f" ),
-                                     m_brandstof.PrijsVoorLand( huidig ) );
+                    TekstGedimdFmt( T( "Uit brandstofprijzen.json: %s %.2f" ),
+                                     SpelInfo::Munt(), m_brandstof.PrijsVoorLand( huidig ) );
                 }
             }
         }
@@ -3438,13 +3485,16 @@ namespace Ritten
         TekstGedimd( T( "Voor het omrekenen naar kosten" ) );
         ImGui::Spacing();
         ImGui::SetNextItemWidth( VeldBreedte() );
-        if( ImGui::InputText( T( "EUR per liter" ), m_prijsBuffer, sizeof( m_prijsBuffer ),
+        const std::string prijsLabel = std::string( SpelInfo::Munt() )
+            + ( Eenheden::Imperiaal() ? T( " per gallon" ) : T( " per liter" ) );
+        if( ImGui::InputText( prijsLabel.c_str(), m_prijsBuffer, sizeof( m_prijsBuffer ),
                                ImGuiInputTextFlags_CharsDecimal ) )
         {
             double waarde = atof( m_prijsBuffer );
             if( waarde > 0.0 )
             {
-                m_brandstof.ZetPrijsPerLiter( waarde );
+                // Typed in the display unit; stored, as always, per litre.
+                m_brandstof.ZetPrijsPerLiter( Eenheden::PrijsInvoerNaarLiter( waarde ) );
             }
         }
         ImGui::Spacing();
@@ -3503,6 +3553,71 @@ namespace Ritten
         if( ImGui::Button( T( "Testbericht sturen" ) ) )
         {
             m_discord.StuurTestbericht();
+        }
+        SectieEind();
+
+        // VTC-webhook: same recipe as Discord, but towards the user's own
+        // system. Height counted like everywhere: 3 dimmed text lines,
+        // 4 widget rows (checkbox, URL, key, test button), 3 spacings.
+        SectieStart( "VTC-WEBHOOK", ImVec4( 0.55f, 0.85f, 0.60f, 1.0f ),
+                      SectieHoogte( 3, 4, 3 ) );
+        ImGui::Spacing();
+        ImGui::TextDisabled( T( "Stuurt elke afgeronde rit als JSON naar het systeem van je VTC." ) );
+        ImGui::Spacing();
+
+        if( !m_vtcBuffersGeladen )
+        {
+            std::snprintf( m_vtcUrlBuffer, sizeof( m_vtcUrlBuffer ), "%s", m_vtc.EndpointUrl().c_str() );
+            std::snprintf( m_vtcSleutelBuffer, sizeof( m_vtcSleutelBuffer ), "%s", m_vtc.Sleutel().c_str() );
+            m_vtcBuffersGeladen = true;
+        }
+
+        bool vtcAan = m_vtc.IsIngeschakeld();
+        if( ImGui::Checkbox( T( "Ritten doorsturen" ), &vtcAan ) )
+        {
+            m_vtc.ZetIngeschakeld( vtcAan );
+        }
+
+        float vtcKnop = ImGui::CalcTextSize( T( "Plakken" ) ).x + 20.0f;
+        ImGui::SetNextItemWidth( -( vtcKnop + 8.0f ) );
+        if( ImGui::InputText( "##vtcurl", m_vtcUrlBuffer, sizeof( m_vtcUrlBuffer ) ) )
+        {
+            m_vtc.ZetEndpointUrl( m_vtcUrlBuffer );
+        }
+        ImGui::SameLine();
+        if( ImGui::Button( ( std::string( T( "Plakken" ) ) + "##vtcurlplak" ).c_str() ) )
+        {
+            const std::string uitKlembord = LeesVanKlembord();
+            if( !uitKlembord.empty() )
+            {
+                std::snprintf( m_vtcUrlBuffer, sizeof( m_vtcUrlBuffer ), "%s", uitKlembord.c_str() );
+                m_vtc.ZetEndpointUrl( m_vtcUrlBuffer );
+            }
+        }
+        ImGui::TextDisabled( T( "Adres (https), van je VTC gekregen" ) );
+
+        ImGui::SetNextItemWidth( -( vtcKnop + 8.0f ) );
+        if( ImGui::InputText( "##vtcsleutel", m_vtcSleutelBuffer, sizeof( m_vtcSleutelBuffer ),
+                              ImGuiInputTextFlags_Password ) )
+        {
+            m_vtc.ZetSleutel( m_vtcSleutelBuffer );
+        }
+        ImGui::SameLine();
+        if( ImGui::Button( ( std::string( T( "Plakken" ) ) + "##vtcsleutelplak" ).c_str() ) )
+        {
+            const std::string uitKlembord = LeesVanKlembord();
+            if( !uitKlembord.empty() )
+            {
+                std::snprintf( m_vtcSleutelBuffer, sizeof( m_vtcSleutelBuffer ), "%s", uitKlembord.c_str() );
+                m_vtc.ZetSleutel( m_vtcSleutelBuffer );
+            }
+        }
+        ImGui::TextDisabled( T( "Sleutel (gaat mee als Authorization: Bearer)" ) );
+
+        ImGui::Spacing();
+        if( ImGui::Button( ( std::string( T( "Testbericht sturen" ) ) + "##vtctest" ).c_str() ) )
+        {
+            m_vtc.StuurTestbericht();
         }
         SectieEind();
 
@@ -3641,7 +3756,7 @@ namespace Ritten
                 ImGui::Text( T( "Buslijn -- %d haltes" ), (int)t.haltes.size() );
             else
                 ImGui::Text( "%s -> %s", t.bronStad.c_str(), t.bestemmingStad.c_str() );
-            ImGui::TextDisabled( "%.0f km -- %s", t.afgelegdeAfstandKm,
+            ImGui::TextDisabled( "%.0f %s -- %s", Eenheden::Km( t.afgelegdeAfstandKm ), Eenheden::AfstandLabel(),
                                   t.status == TripStatus::Voltooid ? T( "Voltooid" ) : T( "Geannuleerd" ) );
             ImGui::EndGroup();
 
@@ -3717,18 +3832,19 @@ namespace Ritten
         ImGui::SameLine();
         statKaart( T( "BUS" ), std::to_string( totalen.aantalBusRitten ) );
         ImGui::SameLine();
-        statKaart( T( "AFSTAND" ), std::to_string( (int)totalen.totaalAfstandKm ) + " km" );
+        statKaart( T( "AFSTAND" ), std::to_string( (int)Eenheden::Km( totalen.totaalAfstandKm ) )
+                    + " " + Eenheden::AfstandLabel() );
 
         // Amounts without cents: for a total over dozens of trips they say
         // nothing and only cost width.
         char buf[ 32 ];
-        snprintf( buf, sizeof( buf ), "EUR %lld", (long long)totalen.totaalInkomen );
+        snprintf( buf, sizeof( buf ), "%s %lld", SpelInfo::Munt(), (long long)totalen.totaalInkomen );
         statKaart( T( "VERDIEND" ), buf );
         ImGui::SameLine();
-        snprintf( buf, sizeof( buf ), "EUR %.0f", totalen.totaalBrandstofKostenEuro );
+        snprintf( buf, sizeof( buf ), "%s %.0f", SpelInfo::Munt(), totalen.totaalBrandstofKostenEuro );
         statKaart( T( "BRANDSTOF" ), buf );
         ImGui::SameLine();
-        snprintf( buf, sizeof( buf ), "EUR %.0f", netto );
+        snprintf( buf, sizeof( buf ), "%s %.0f", SpelInfo::Munt(), netto );
         statKaart( T( "NETTO" ), buf, true );
 
         // --- Fuel this session --------------------------------------------
@@ -3741,9 +3857,12 @@ namespace Ritten
 
                 ImGui::Spacing();
                 if( m_kleinFont ) { ImGui::PushFont( m_kleinFont ); m_kleinFontActief = true; }
-                TekstGedimdFmt( T( "Getankt: %dx, %.0f liter, EUR %.0f" ),
-                                 aantal, liters, kosten );
-                TekstGedimdFmt( T( "EUR %.2f per liter (zelf ingesteld)" ), m_brandstof.PrijsPerLiter() );
+                TekstGedimdFmt( Eenheden::Imperiaal() ? T( "Getankt: %dx, %.0f gallon, %s %.0f" )
+                                                        : T( "Getankt: %dx, %.0f liter, %s %.0f" ),
+                                 aantal, Eenheden::Liters( liters ), SpelInfo::Munt(), kosten );
+                TekstGedimdFmt( Eenheden::Imperiaal() ? T( "%s %.2f per gallon (zelf ingesteld)" )
+                                                     : T( "%s %.2f per liter (zelf ingesteld)" ),
+                                 SpelInfo::Munt(), Eenheden::PrijsPerVolume( m_brandstof.PrijsPerLiter() ) );
                 if( m_kleinFont ) { ImGui::PopFont(); m_kleinFontActief = false; }
             }
         }

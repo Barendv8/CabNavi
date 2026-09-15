@@ -65,7 +65,7 @@ enum { ImGuiWindowFlags_None = 0, ImGuiWindowFlags_NoTitleBar = 1 << 0,
 
 enum { ImGuiStyleVar_ItemSpacing, ImGuiStyleVar_FramePadding, ImGuiStyleVar_WindowPadding };
 
-enum { ImGuiInputTextFlags_None = 0, ImGuiInputTextFlags_CharsDecimal = 1 << 0 };
+enum { ImGuiInputTextFlags_None = 0, ImGuiInputTextFlags_CharsDecimal = 1 << 0, ImGuiInputTextFlags_Password = 1 << 15 };
 
 enum { ImGuiHoveredFlags_None = 0 };
 

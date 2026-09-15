@@ -21,10 +21,12 @@
 #include "IncidentRecorder.hxx"
 #include "FuelCosts.hxx"
 #include "Kaartdata.hxx"
+#include "Spel.hxx"
 #include "Overlay.hxx"
 #include "PlayersNearby.hxx"
 #include "TripLogger.hxx"
 #include "TruckTracking.hxx"
+#include "VtcWebhook.hxx"
 
 #include <cstdlib>
 #include <filesystem>
@@ -38,6 +40,7 @@ namespace
     std::unique_ptr<Ritten::TripLogger> g_logger;
     std::unique_ptr<Ritten::FuelCosts> g_brandstof;
     std::unique_ptr<Ritten::DiscordWebhook> g_discord;
+    std::unique_ptr<Ritten::VtcWebhook> g_vtcWebhook;
     std::unique_ptr<Ritten::IncidentRecorder> g_incidentRecorder;
     std::unique_ptr<Ritten::BusTracking> g_busTracking;
     std::unique_ptr<Ritten::TruckTracking> g_vrachtTracking;
@@ -128,7 +131,7 @@ namespace
 
         g_overlay = std::make_unique<Ritten::Overlay>(
             *g_logger, *g_busTracking, *g_vrachtTracking, *g_spelers, *g_brandstof, *g_discord,
-            *g_incidentRecorder );
+            *g_vtcWebhook, *g_incidentRecorder );
 
         HWND spelVenster = ZoekSpelvenster();
         if( spelVenster == nullptr )
@@ -462,18 +465,6 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
                                                      std::filesystem::copy_options::skip_existing, ec );
                     }
                 }
-
-                // The logo used to be named after the builder's company; now it is
-                // simply logo.png. Take it along, otherwise it says "no logo" while
-                // the file is there.
-                const std::filesystem::path oudLogo = nieuw / "weeda-logo.png";
-                const std::filesystem::path nieuwLogo = nieuw / "logo.png";
-                if( std::filesystem::exists( oudLogo, ec ) &&
-                    !std::filesystem::exists( nieuwLogo, ec ) )
-                {
-                    std::filesystem::copy_file( oudLogo, nieuwLogo,
-                                                 std::filesystem::copy_options::skip_existing, ec );
-                }
             }
         }
     }
@@ -483,12 +474,28 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
     g_logger->LaadGeschiedenis();
     g_brandstof = std::make_unique<Ritten::FuelCosts>();
     g_discord = std::make_unique<Ritten::DiscordWebhook>();
+    g_vtcWebhook = std::make_unique<Ritten::VtcWebhook>();
     g_incidentRecorder = std::make_unique<Ritten::IncidentRecorder>();
 
     // Every time a trip is completed/cancelled, also try to send a
     // Discord message (DiscordWebhook checks itself whether that is on
     // and whether a URL is set -- we do not need to care here).
-    g_logger->ZetVoltooidCallback( []( const Ritten::Trip &trip ) { g_discord->StuurRitVoltooid( trip ); } );
+    g_logger->ZetVoltooidCallback( []( const Ritten::Trip &trip )
+    {
+        g_discord->StuurRitVoltooid( trip );
+
+        // The VTC webhook gets the tachograph state of THIS moment as well.
+        // Read-only getters on TruckTracking; when tracking is not there
+        // (shutdown race) the block is simply left out of the payload.
+        Ritten::VtcWebhook::TachoMoment tacho;
+        if( g_vrachtTracking )
+        {
+            tacho.geldig = true;
+            tacho.rijMinutenSindsRust = g_vrachtTracking->TachograafRijtijdMinuten();
+            tacho.inRust = g_vrachtTracking->TachograafInRust();
+        }
+        g_vtcWebhook->StuurRit( trip, tacho );
+    } );
 
     // FIRST empty the log, THEN create the components. The other way
     // round, everything a constructor logged was wiped right away --
@@ -544,6 +551,7 @@ TMP_EXPORT void TMP_API truckersmp_shutdown( void )
     g_spelers.reset();
     g_busTracking.reset();
     g_discord.reset();
+    g_vtcWebhook.reset();
     g_incidentRecorder.reset();
     g_brandstof.reset();
     g_logger.reset();
@@ -562,6 +570,16 @@ SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_i
         return SCS_RESULT_unsupported;
     }
     const auto *p = static_cast<const scs_telemetry_init_params_v101_t *>( params );
+
+    // Which game are we in? Decided from the executable (see Spel.hxx); the
+    // SDK's game_id is the cross-check. Log both the answer and a mismatch.
+    {
+        std::string melding;
+        Ritten::SpelInfo::Bevestig( p->common.game_id, melding );
+        Ritten::Logboek::Schrijf( "start", std::string( "game: " ) + Ritten::SpelInfo::Naam()
+                                  + " (" + ( p->common.game_id ? p->common.game_id : "?" ) + ")" );
+        if( !melding.empty() ) Ritten::Logboek::Schrijf( "event", "game check: " + melding );
+    }
 
     if( !g_vrachtTracking )
     {

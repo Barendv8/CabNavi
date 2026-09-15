@@ -1,4 +1,7 @@
 #include "DiscordWebhook.hxx"
+#include "Eenheden.hxx"
+#include "Spel.hxx"
+#include "Taal.hxx"
 
 #include "BoeteTekst.hxx"
 
@@ -115,8 +118,11 @@ namespace Ritten
         const bool isBus = trip.type == TripType::Bus;
         const bool geannuleerd = trip.status == TripStatus::Geannuleerd;
 
-        std::string titel = isBus ? "Buslijn " : "Vrachtrit ";
-        titel += geannuleerd ? "geannuleerd" : "afgerond";
+        // The webhook speaks the language the overlay is set to, and names
+        // the game -- one Discord channel can receive both ETS2 and ATS runs.
+        std::string titel = isBus ? T( "Buslijn " ) : T( "Vrachtrit " );
+        titel += geannuleerd ? T( "geannuleerd" ) : T( "afgerond" );
+        titel += std::string( " [" ) + SpelInfo::Naam() + "]";
 
         std::string beschrijving;
         if( isBus )
@@ -126,7 +132,7 @@ namespace Ritten
             // than a zero.
             beschrijving = trip.haltes.empty()
                 ? std::string()
-                : std::to_string( trip.haltes.size() ) + " haltes";
+                : std::to_string( trip.haltes.size() ) + T( " haltes" );
         }
         else
         {
@@ -166,7 +172,7 @@ namespace Ritten
                 uit.insert( uit.begin(), *it );
                 ++teller;
             }
-            return ( bedrag < 0 ? "-EUR " : "EUR " ) + uit;
+            return ( bedrag < 0 ? "-" : "" ) + std::string( SpelInfo::Munt() ) + " " + uit;
         };
         auto komma = []( double waarde, int decimalen, const char *eenheid ) -> std::string
         {
@@ -184,29 +190,30 @@ namespace Ritten
             if( !trip.bronBedrijf.empty() ) van += " (" + trip.bronBedrijf + ")";
             std::string naar = trip.bestemmingStad.empty() ? "?" : trip.bestemmingStad;
             if( !trip.bestemmingBedrijf.empty() ) naar += " (" + trip.bestemmingBedrijf + ")";
-            veld( velden, "Van", van );
-            veld( velden, "Naar", naar );
+            veld( velden, T( "Van" ), van );
+            veld( velden, T( "Naar" ), naar );
 
             std::string ladingTekst = trip.lading;
             if( trip.ladingGewichtKg > 0.0 )
             {
                 ladingTekst += " -- " + komma( trip.ladingGewichtKg / 1000.0, 1, " t" );
             }
-            veld( velden, "Lading", ladingTekst );
+            veld( velden, T( "Lading" ), ladingTekst );
         }
 
         // --- Distance and time ---
-        std::string afstand = std::to_string( (int)trip.afgelegdeAfstandKm ) + " km";
+        std::string afstand = std::to_string( (int)Eenheden::Km( trip.afgelegdeAfstandKm ) )
+                              + " " + Eenheden::AfstandLabel();
         if( trip.geplandeAfstandKm > 0.0 )
         {
-            afstand += " (gepland " + std::to_string( (int)trip.geplandeAfstandKm ) + ")";
+            afstand += T( " (gepland " ) + std::to_string( (int)Eenheden::Km( trip.geplandeAfstandKm ) ) + ")";
         }
-        veld( velden, "Afstand", afstand );
+        veld( velden, T( "Afstand" ), afstand );
 
         if( trip.economyEindTijd > trip.economyStartTijd )
         {
             const std::uint32_t minuten = trip.economyEindTijd - trip.economyStartTijd;
-            veld( velden, "Duur (speltijd)",
+            veld( velden, T( "Duur (speltijd)" ),
                   std::to_string( minuten / 60 ) + "u " + std::to_string( minuten % 60 ) + "m" );
         }
 
@@ -217,22 +224,26 @@ namespace Ritten
             if( !truck.empty() ) truck += " ";
             truck += trip.voertuigModel;
         }
-        veld( velden, isBus ? "Bus" : "Truck", truck );
+        veld( velden, isBus ? T( "Bus" ) : T( "Truck" ), truck );
 
         // --- Fuel ---
         if( trip.brandstofVerbruikLiters > 0.0 )
         {
-            std::string brandstof = komma( trip.brandstofVerbruikLiters, 1, " l" );
+            std::string brandstof = komma( Eenheden::Liters( trip.brandstofVerbruikLiters ), 1,
+                                            Eenheden::Imperiaal() ? " gal" : " l" );
             if( trip.afgelegdeAfstandKm > 1.0 )
             {
-                brandstof += " (" +
-                    komma( trip.brandstofVerbruikLiters / trip.afgelegdeAfstandKm * 100.0, 1, " l/100km" ) + ")";
+                // Same unit ladder as the overlay: km/l metric, mpg imperial.
+                const double kmpl = trip.afgelegdeAfstandKm / trip.brandstofVerbruikLiters;
+                brandstof += " (" + komma( Eenheden::Verbruik( kmpl ), 1,
+                                            Eenheden::Imperiaal() ? " mpg" : " km/l" ) + ")";
             }
-            veld( velden, "Verbruik", brandstof );
+            veld( velden, T( "Verbruik" ), brandstof );
         }
         if( trip.brandstofKostenEuro > 0.0 )
         {
-            veld( velden, "Brandstofkosten", komma( trip.brandstofKostenEuro, 2, "" ).insert( 0, "EUR " ) );
+            veld( velden, T( "Brandstofkosten" ),
+                  komma( trip.brandstofKostenEuro, 2, "" ).insert( 0, std::string( SpelInfo::Munt() ) + " " ) );
         }
 
         // --- Damage ---
@@ -241,16 +252,16 @@ namespace Ritten
         if( trip.schadeChassisPercentage > 0.0 || trip.ladingSchadePercentage > 0.0
             || trip.aanhangerSchadePercentage > 0.0 )
         {
-            veld( velden, "Schade",
-                  "chassis " + komma( trip.schadeChassisPercentage, 0, "%" ) +
-                  " | lading " + komma( trip.ladingSchadePercentage, 0, "%" ) +
+            veld( velden, T( "Schade" ),
+                  std::string( T( "chassis " ) ) + komma( trip.schadeChassisPercentage, 0, "%" ) +
+                  T( " | lading " ) + komma( trip.ladingSchadePercentage, 0, "%" ) +
                   " | trailer " + komma( trip.aanhangerSchadePercentage, 0, "%" ) );
         }
 
         // --- Expenses: the part TrucksBook-style reports miss ---
-        if( trip.tolKosten > 0 )      veld( velden, "Tol", geld( trip.tolKosten ) );
-        if( trip.veerbootKosten > 0 ) veld( velden, "Veerboot", geld( trip.veerbootKosten ) );
-        if( trip.treinKosten > 0 )    veld( velden, "Trein", geld( trip.treinKosten ) );
+        if( trip.tolKosten > 0 )      veld( velden, T( "Tol" ), geld( trip.tolKosten ) );
+        if( trip.veerbootKosten > 0 ) veld( velden, T( "Veerboot" ), geld( trip.veerbootKosten ) );
+        if( trip.treinKosten > 0 )    veld( velden, T( "Trein" ), geld( trip.treinKosten ) );
 
         if( !trip.boetes.empty() )
         {
@@ -264,13 +275,13 @@ namespace Ritten
                 std::string regel = "- " + VertaalOffence( b.reden ) + ": " + geld( b.bedrag ) + "\n";
                 if( regels.size() + regel.size() > 900 )
                 {
-                    regels += "- (+" + std::to_string( (int)trip.boetes.size() - getoond ) + " meer)";
+                    regels += "- (+" + std::to_string( (int)trip.boetes.size() - getoond ) + T( " meer)" );
                     break;
                 }
                 regels += regel;
                 ++getoond;
             }
-            veld( velden, "Boetes (" + geld( trip.boeteKosten ) + ")", regels, false );
+            veld( velden, T( "Boetes (" ) + geld( trip.boeteKosten ) + ")", regels, false );
         }
 
         // --- Financial summary ---
@@ -279,10 +290,10 @@ namespace Ritten
         const std::int64_t netto = opbrengst - onkosten
                                     - static_cast<std::int64_t>( trip.brandstofKostenEuro );
 
-        veld( velden, "Opbrengst", geld( opbrengst ) );
+        veld( velden, T( "Opbrengst" ), geld( opbrengst ) );
         if( onkosten > 0 || trip.brandstofKostenEuro > 0.0 )
         {
-            veld( velden, "Netto", geld( netto ) );
+            veld( velden, T( "Netto" ), geld( netto ) );
         }
 
         // --- Bus: stops and passengers ---
@@ -310,24 +321,24 @@ namespace Ritten
                 else if( uit > 0 )
                     route += " (-" + std::to_string( uit ) + ")";
             }
-            veld( velden, "Route", route, false );
+            veld( velden, T( "Route" ), route, false );
 
             // How many people you carried this trip: the sum of all boarders.
             // trip.passagiers is the number ON BOARD, and at the end of the trip
             // that is zero -- not what you want to report here.
             if( totaalIn > 0 )
             {
-                veld( velden, "Passagiers", std::to_string( totaalIn ) );
+                veld( velden, T( "Passagiers" ), std::to_string( totaalIn ) );
             }
         }
 
         if( geannuleerd && !trip.annuleringsReden.empty() )
         {
-            veld( velden, "Reden annulering", trip.annuleringsReden, false );
+            veld( velden, T( "Reden annulering" ), trip.annuleringsReden, false );
         }
         if( !trip.serverNaam.empty() )
         {
-            veld( velden, "Server", trip.serverNaam );
+            veld( velden, T( "Server" ), trip.serverNaam );
         }
 
         embed[ "fields" ] = velden;
@@ -373,7 +384,7 @@ namespace Ritten
         }
 
         json payload;
-        payload[ "content" ] = "CabNavi is verbonden -- als je dit ziet, werkt de webhook!";
+        payload[ "content" ] = T( "CabNavi is verbonden -- als je dit ziet, werkt de webhook!" );
         {
             std::lock_guard<std::mutex> lock( m_queueMutex );
             m_wachtrij.push_back( WerkItem{ url, payload.dump() } );

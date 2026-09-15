@@ -21,6 +21,7 @@ namespace nlohmann
         json &operator[]( const std::string & ) { return *this; }
         const json &operator[]( const char * ) const { return *this; }
         std::size_t size() const { return 0; }
+        bool empty() const { return true; }
         json &operator[]( std::size_t ) { return *this; }
 
         template <typename T> json &operator=( const T & ) { return *this; }

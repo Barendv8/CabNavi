@@ -121,7 +121,7 @@
     <div class="titelblok">
       <p class="eyebrow">Ritten Overlay — Logboek</p>
       <h1>Jouw route,<br>op papier gezet.</h1>
-      <p class="sub">Open het bestand <code>%APPDATA%\RittenOverlay\trips.jsonl</code> (aangemaakt door de plugin) om je vracht- en buslijnritten hier te bekijken.</p>
+      <p class="sub">Open het bestand <code>%APPDATA%\CabNavi\trips.jsonl</code> (ETS2) of <code>trips_ats.jsonl</code> (ATS) om je vracht- en buslijnritten hier te bekijken.</p>
     </div>
     <div>
       <label class="laad-knop" for="bestandInvoer">Trips.jsonl openen</label>
@@ -169,11 +169,15 @@
   <footer>RITTEN OVERLAY // lokaal dashboard, verwerkt alles in je browser — er wordt niets verstuurd</footer>
 
 <script>
+let munt = '\u20ac';
 let alleRitten = [];
 let actiefFilter = 'alles';
 
 document.getElementById('bestandInvoer').addEventListener('change', (e) => {
   const bestand = e.target.files[0];
+  // trips_ats.jsonl is het ATS-logboek en rekent in dollars; de
+  // ritregels zelf dragen (nog) geen muntveld, dus de bestandsnaam beslist.
+  munt = /ats/i.test(bestand.name) ? '$' : '\u20ac';
   if(!bestand) return;
   const reader = new FileReader();
   reader.onload = (ev) => verwerkBestand(ev.target.result);
@@ -221,8 +225,8 @@ function render(){
     ${gaugeHtml('Buslijnritten', bus.length, '', 'groen')}
     ${gaugeHtml('Totale afstand', Math.round(totaalKm).toLocaleString('nl-NL'), 'km', '')}
     ${gaugeHtml('Totaal verdiend', Math.round(totaalInkomen).toLocaleString('nl-NL'), '', '')}
-    ${gaugeHtml('Brandstofkosten', '€' + totaalBrandstof.toFixed(0), '', '')}
-    ${gaugeHtml('Netto resultaat', '€' + Math.round(totaalInkomen - totaalBrandstof).toLocaleString('nl-NL'), '', 'groen')}
+    ${gaugeHtml('Brandstofkosten', munt + totaalBrandstof.toFixed(0), '', '')}
+    ${gaugeHtml('Netto resultaat', munt + Math.round(totaalInkomen - totaalBrandstof).toLocaleString('nl-NL'), '', 'groen')}
   `;
 
   const body = document.getElementById('tabelBody');
@@ -235,7 +239,7 @@ function render(){
       <td>${r.server || '—'}</td>
       <td class="num">${Math.round(r.afgelegde_afstand_km||0).toLocaleString('nl-NL')} km</td>
       <td class="num">${Math.round(r.inkomen || r.geschatte_uitbetaling || 0).toLocaleString('nl-NL')}</td>
-      <td class="num">€${(r.brandstof_kosten_euro||0).toFixed(2)}</td>
+      <td class="num">${munt}${(r.brandstof_kosten_euro||0).toFixed(2)}</td>
       <td class="status-${r.status}">${r.status === 'voltooid' ? 'Voltooid' : 'Geannuleerd'}</td>
       <td>${(r.eind_tijd||'').replace('T',' ').replace('Z','')}</td>
     </tr>

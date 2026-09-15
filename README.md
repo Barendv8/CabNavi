@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  An in-game HUD overlay and trip logbook for <b>TruckersMP</b> (Euro Truck Simulator 2)
+  An in-game HUD overlay and trip logbook for <b>TruckersMP</b> (Euro Truck Simulator 2 and American Truck Simulator)
 </p>
 
 ---
@@ -40,17 +40,11 @@ cost, and how you are doing over time.
 
 **On the road**
 - Live speed with the current limit, fuel level, cruise control and range
-- Fuel consumption in km/l, switching to l/hour when you are standing still
-  -- measured from the tank, not taken from the SDK's estimate
-- Average per truck that stays in step with the truck's own dashboard: the
-  trip counter is read from your save (read only), so no reset button, and
-  an autosave reload is followed too
-- Driving style: ECO / NORMAL / POWER / IDLE live from the pedal, plus how
-  your last three minutes compare to your own normal in that truck
+- Fuel consumption in km/l or mpg, switching to l/hour when you are standing still
+- Units follow the game (metric in ETS2, imperial in ATS) or your own choice
 - Your own tachograph: follow the game, your own rules, or EU driving times
 - Damage for truck, trailer and cargo at a glance
-- Refuelling: country and price from your position and the game's own data
-  files, own-garage discount recognised, totals match your bank account
+- Efficiency line: how this trip compares to your own average
 
 **Around you**
 - Radar with nearby players, real bearing and heading from vehicle positions
@@ -76,18 +70,19 @@ cost, and how you are doing over time.
 **Other**
 - Dutch and English, switchable in the settings
 - Your own logo in the header
-- Two network switches (TruckersMP API, map table update), both visible in
-  Settings and both can be turned off; everything else stays on your PC
+- Everything can be turned off; nothing contacts the internet unless you
+  enable it
 
 ---
 
 ## Installation
 
 1. Download **CabNavi-x.y.z-setup.exe** from the [Releases](../../releases) page.
-2. Run it: Next, Next, Finish. Setup finds your game (Steam registry and all
-   library folders), installs the plugin into `<game>\bin\win_x64\plugins\`
-   and puts the icons and default logo in `%APPDATA%\CabNavi\`. Only if it
-   cannot find the game does it ask for the folder.
+2. Run it: Next, Next, Finish. Setup finds Euro Truck Simulator 2 and
+   American Truck Simulator (Steam registry and all library folders),
+   installs the plugin into `<game>\bin\win_x64\plugins\` of every game
+   it finds, and puts the icons and default logo in `%APPDATA%\CabNavi\`.
+   Only if it finds neither game does it ask for a folder.
 3. Start the game through TruckersMP. Press **Insert** to show or hide the
    overlay, and **right click** to toggle the mouse.
 
@@ -237,10 +232,11 @@ City positions live in the map data, which the plugin does not parse. When
 a map DLC adds cities:
 
 1. Run the [truckermudgeon/maps](https://github.com/truckermudgeon/maps)
-   parser once against your game folder (`npx tsx packages/clis/parser/index.ts -i "<ETS2 folder>" -o <out>`).
-2. `python tools/kaartdata/maak_tabel.py <out>` — writes
-   `src/KaartdataTabel.hxx` (for the next build) and `data/kaartdata.json`
-   (for the download).
+   parser once against the game folder (`npx tsx packages/clis/parser/index.ts -i "<game folder>" -o <out>`).
+2. ETS2: `python tools/kaartdata/maak_tabel.py <out>` — writes
+   `src/KaartdataTabel.hxx` and `data/kaartdata.json`.
+   ATS: `python tools/kaartdata/maak_tabel_ats.py <out>` — writes
+   `src/KaartdataTabelAts.hxx` and `data/kaartdata_ats.json`.
 3. Commit both. Users with the download switch on get the new table at their
    next start; the next release embeds it.
 
@@ -268,62 +264,8 @@ These are not bugs; the data simply is not available:
 
 ## Contributing
 
-Issues and pull requests are welcome. The interface is available in both
-Dutch and English.
-
-The source comments and the debug log are in English. Identifiers (classes,
-functions, variables) are in Dutch, because that is how the project grew and
-renaming them would only risk breaking something that works. A short glossary
-covers most of what you will meet:
-
-| Dutch | English | | Dutch | English |
-|---|---|---|---|---|
-| rit, ritten | trip(s) | | verbruik | consumption |
-| brandstof | fuel | | tankbeurt | refuelling stop |
-| snelheid | speed | | kilometerstand / kmStand | odometer |
-| voertuig | vehicle | | halte | (bus) stop |
-| spelers | players | | teller | counter |
-| glad | smoothed | | meting | measurement |
-| instellingen | settings | | uiterlijk | appearance |
-| kaart | map | | land | country |
-| bewaren / laden | save / load | | teken(en) | draw |
-
-## ⚖️ Legal disclaimer
-
-This project is an unofficial, community-made overlay and third-party tool.
-It is built on publicly available data from the **SCS Telemetry SDK**, the
-**TruckersMP Client SDK** and the **public TruckersMP Web API**, plus read-only
-access to your own save file and the game's data files.
-
-**No affiliation.** This project is not affiliated with, endorsed by,
-sponsored by, or connected in any way with SCS Software or TruckersMP.
-
-**Trademarks.** "Euro Truck Simulator 2", "SCS Software" and "TruckersMP",
-including all associated logos, names and images, are the exclusive property
-and trademarks of their respective owners. They are used here only to
-describe what this plugin works with.
-
-**No advantage.** CabNavi does not modify the game, does not change how you
-appear to other players, and gives no advantage in traffic or in jobs. It
-only shows information the game already provides to you. Your save and the
-game files are opened for reading only and never written.
-
-**Use at your own risk.** This software is provided "as is", without any
-warranty. It is meant for loyal ETS2 and TruckersMP players. If you tamper
-with the software yourself and that causes technical problems, or if you
-modify it and end up banned on TruckersMP, that is on you and not on the
-developer. Always follow the official TruckersMP rules, and drive by them
-too. See sections 15 and 16 of the GPL-3.0 for the full legal wording.
-
-**If something breaks.** Plugins run inside the game process. If the game
-starts behaving oddly, remove `cabnavi.dll` from the plugins folder (or
-uninstall via Apps & features) and check whether the problem goes away before
-reporting it elsewhere.
-
-**Your data stays yours.** Nothing about you is uploaded anywhere. Network
-requests go to `api.truckersmp.com` and to this repository (for the map
-table) while those two switches are on, and to a Discord webhook only if you
-configure one yourself. See [PRIVACY.md](PRIVACY.md).
+Issues and pull requests are welcome. The source comments are in Dutch; the
+interface is available in both Dutch and English.
 
 ## License
 

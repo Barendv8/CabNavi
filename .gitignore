@@ -45,10 +45,15 @@ spelers_vtc.json
 brandstofprijzen.json
 incident_instellingen.json
 imgui.ini
-
-# --- Your own branding -----------------------------------------------------
-# The default logo ships with the project; a personal one does not.
-weeda-logo.png
+# v1.1: per-game files and the VTC webhook key
+trips_ats.jsonl
+meting.txt
+meting_ats.txt
+voertuigen.txt
+discord.json
+vtc_webhook.json
+# game saves (only ever read, never belong here)
+*.sii
 
 # --- OS --------------------------------------------------------------------
 Thumbs.db

@@ -83,6 +83,7 @@ add_library(cabnavi SHARED
     src/PlayersNearby.cxx
     src/FuelCosts.cxx
     src/DiscordWebhook.cxx
+    src/VtcWebhook.cxx
     src/WebApi.cxx
     src/IncidentRecorder.cxx
     src/Overlay.cxx

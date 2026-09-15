@@ -1,4 +1,5 @@
 #include "TruckTracking.hxx"
+#include "Spel.hxx"
 
 #include "BusTracking.hxx"
 #include "IncidentRecorder.hxx"
@@ -80,7 +81,13 @@ namespace Ritten
             pad /= "CabNavi";
             std::error_code ec;
             std::filesystem::create_directories( pad, ec );
-            return pad / "meting.txt";
+            // ETS2 keeps its historic file name; ATS gets its own, so a
+            // factor measured in one game can never seed the other
+            // (seen 14-09: ETS2's 9.56 started an ATS session, and ATS's
+            // 19.79 would have flowed back). Whether the numbers differ
+            // because of the games or because of TruckersMP is not
+            // decided here -- separate files make it irrelevant.
+            return pad / ( SpelInfo::IsAts() ? "meting_ats.txt" : "meting.txt" );
         }
 
         // Per-vehicle counter, next to meting.txt. Plain text, one line per

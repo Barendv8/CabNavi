@@ -1,4 +1,5 @@
 #include "BusTracking.hxx"
+#include "Spel.hxx"
 
 #include "CallbackHulp.hxx"
 #include "Logboek.hxx"
@@ -45,7 +46,9 @@ namespace Ritten
     BusTracking::BusTracking( TruckersMP::Session &session, TripLogger &logger )
         : m_logger( logger )
     {
-        m_busModule = TruckersMP::BusModule::Attach( session );
+        // Bus lines are a TruckersMP-ETS2 gameplay system; in ATS the module
+        // has nothing to report, so do not even attach and let the tab sleep.
+        m_busModule = SpelInfo::IsAts() ? nullptr : TruckersMP::BusModule::Attach( session );
         if( !m_busModule )
         {
             // Bus module not available (e.g. older client, or intent not

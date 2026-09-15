@@ -1,5 +1,7 @@
 #include "Kaartdata.hxx"
 #include "KaartdataTabel.hxx"
+#include "KaartdataTabelAts.hxx"
+#include "Spel.hxx"
 #include "HttpHulp.hxx"
 #include "Logboek.hxx"
 
@@ -54,6 +56,26 @@ namespace Ritten
             while( std::getline( ss, deel, '.' ) ) uit.push_back( std::atoi( deel.c_str() ) );
             return uit;
         }
+
+        // The embedded table of the game this process runs in. One process is
+        // ever one game, so a single runtime table plus this switch suffices;
+        // the ETS2 arrays and behaviour are untouched by the ATS twin.
+        struct Ingebakken
+        {
+            const char *versie; const Kaart::Stad *steden; int aantalSteden;
+            const Kaart::Punt *garages; int aantalGarages;
+            const Kaart::Pomp *pompen; int aantalPompen;
+        };
+        Ingebakken IngebakkenTabel()
+        {
+            if( SpelInfo::IsAts() )
+                return { KaartAts::KAART_VERSIE, KaartAts::STEDEN, KaartAts::AANTAL_STEDEN,
+                         KaartAts::GARAGES, KaartAts::AANTAL_GARAGES,
+                         KaartAts::POMPEN, KaartAts::AANTAL_POMPEN };
+            return { Kaart::KAART_VERSIE, Kaart::STEDEN, Kaart::AANTAL_STEDEN,
+                     Kaart::GARAGES, Kaart::AANTAL_GARAGES,
+                     Kaart::POMPEN, Kaart::AANTAL_POMPEN };
+        }
     }
 
     bool Kaartdata::VersieNieuwer( const std::string &a, const std::string &b )
@@ -81,11 +103,12 @@ namespace Ritten
             if( pomp >= 0 ) { p.afstandPompM = d; p.bijPomp = d <= POMP_STRAAL_M; p.bijGarage = p.bijPomp && g_tabel.pompen[ pomp ].garage; }
             return p;
         }
-        const int s = Dichtstbij( Kaart::STEDEN, Kaart::AANTAL_STEDEN, x, z, d );
-        if( s >= 0 ) { p.stad = Kaart::STEDEN[ s ].token; p.land = Kaart::STEDEN[ s ].land; p.afstandStadM = d; }
-        if( Dichtstbij( Kaart::GARAGES, Kaart::AANTAL_GARAGES, x, z, d ) >= 0 ) p.afstandGarageM = d;
-        const int pomp = Dichtstbij( Kaart::POMPEN, Kaart::AANTAL_POMPEN, x, z, d );
-        if( pomp >= 0 ) { p.afstandPompM = d; p.bijPomp = d <= POMP_STRAAL_M; p.bijGarage = p.bijPomp && Kaart::POMPEN[ pomp ].garage; }
+        const Ingebakken ik = IngebakkenTabel();
+        const int s = Dichtstbij( ik.steden, ik.aantalSteden, x, z, d );
+        if( s >= 0 ) { p.stad = ik.steden[ s ].token; p.land = ik.steden[ s ].land; p.afstandStadM = d; }
+        if( Dichtstbij( ik.garages, ik.aantalGarages, x, z, d ) >= 0 ) p.afstandGarageM = d;
+        const int pomp = Dichtstbij( ik.pompen, ik.aantalPompen, x, z, d );
+        if( pomp >= 0 ) { p.afstandPompM = d; p.bijPomp = d <= POMP_STRAAL_M; p.bijGarage = p.bijPomp && ik.pompen[ pomp ].garage; }
         return p;
     }
 
@@ -97,6 +120,12 @@ namespace Ritten
             const nlohmann::json j = nlohmann::json::parse( tekst );
             t.versie = j.value( "versie", std::string() );
             if( t.versie.empty() ) { fout = "no version"; return false; }
+            // Both games share %APPDATA%\CabNavi\ and their version numbers
+            // (1.60.1.x) can cross-match, so the table names its game. An
+            // absent field means an ETS2 table from before ATS support.
+            const std::string spel = j.value( "spel", std::string( "ets2" ) );
+            const std::string hier = SpelInfo::IsAts() ? "ats" : "ets2";
+            if( spel != hier ) { fout = "table is for " + spel + ", running " + hier; return false; }
             if( !j.contains( "steden" ) || !j[ "steden" ].is_array() ) { fout = "no cities"; return false; }
             for( const auto &s : j[ "steden" ] )
             {
@@ -131,7 +160,7 @@ namespace Ritten
         if( t.steden.size() < 50 ) { fout = "table too small"; return false; }  // a real map has hundreds
 
         std::lock_guard<std::mutex> lock( g_slot );
-        const std::string actief = g_tabel.geladen ? g_tabel.versie : std::string( Kaart::KAART_VERSIE );
+        const std::string actief = g_tabel.geladen ? g_tabel.versie : std::string( IngebakkenTabel().versie );
         if( !forceer && !VersieNieuwer( t.versie, actief ) ) { fout = "not newer than " + actief; return false; }
         t.geladen = true;
         g_tabel = std::move( t );
@@ -146,15 +175,25 @@ namespace Ritten
         return LaadJson( ss.str(), fout );
     }
 
-    std::string Kaartdata::Versie() { std::lock_guard<std::mutex> lock( g_slot ); return g_tabel.geladen ? g_tabel.versie : std::string( Kaart::KAART_VERSIE ); }
-    int Kaartdata::AantalSteden() { std::lock_guard<std::mutex> lock( g_slot ); return g_tabel.geladen ? static_cast<int>( g_tabel.steden.size() ) : Kaart::AANTAL_STEDEN; }
+    std::string Kaartdata::Versie() { std::lock_guard<std::mutex> lock( g_slot ); return g_tabel.geladen ? g_tabel.versie : std::string( IngebakkenTabel().versie ); }
+    int Kaartdata::AantalSteden() { std::lock_guard<std::mutex> lock( g_slot ); return g_tabel.geladen ? static_cast<int>( g_tabel.steden.size() ) : IngebakkenTabel().aantalSteden; }
     std::string Kaartdata::Bron() { std::lock_guard<std::mutex> lock( g_slot ); return g_tabel.geladen ? "downloaded" : "embedded"; }
 
     namespace
     {
         std::thread g_updateThread;
         constexpr const wchar_t *UPDATE_HOST = L"raw.githubusercontent.com";
-        constexpr const wchar_t *UPDATE_PAD = L"/Barendv8/CabNavi/main/data/kaartdata.json";
+        const wchar_t *UpdatePad()
+        {
+            return SpelInfo::IsAts() ? L"/Barendv8/CabNavi/main/data/kaartdata_ats.json"
+                                     : L"/Barendv8/CabNavi/main/data/kaartdata.json";
+        }
+    }
+
+    // One cache file per game, in the shared %APPDATA%\CabNavi\ folder.
+    const char *Kaartdata::CacheBestandsnaam()
+    {
+        return SpelInfo::IsAts() ? "kaartdata_ats.json" : "kaartdata.json";
     }
 
     void Kaartdata::StartUpdate( const std::filesystem::path &cacheMap )
@@ -165,7 +204,7 @@ namespace Ritten
             g_updateThread = std::thread( [ cacheMap ]()
             {
                 std::string body, fout;
-                if( !HttpGet( UPDATE_HOST, UPDATE_PAD, body, fout ) )
+                if( !HttpGet( UPDATE_HOST, UpdatePad(), body, fout ) )
                 {
                     Logboek::Schrijf( "event", "map table update: not fetched (" + fout + "), keeping " + Kaartdata::Versie() );
                     return;
@@ -174,7 +213,7 @@ namespace Ritten
                 if( Kaartdata::LaadJson( body, fout ) )
                 {
                     // Only now write: a table that was accepted. OUR file in AppData.
-                    std::ofstream uit( cacheMap / "kaartdata.json", std::ios::binary | std::ios::trunc );
+                    std::ofstream uit( cacheMap / Kaartdata::CacheBestandsnaam(), std::ios::binary | std::ios::trunc );
                     if( uit ) uit << body;
                     Logboek::Schrijf( "event", "map table update: " + voor + " -> " + Kaartdata::Versie() + " (" + std::to_string( Kaartdata::AantalSteden() ) + " cities)" );
                 }

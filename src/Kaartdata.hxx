@@ -53,6 +53,7 @@ namespace Ritten
         static bool VersieNieuwer( const std::string &a, const std::string &b );
 
         static std::string Versie();       // of the active table
+        static const char *CacheBestandsnaam();  // "kaartdata.json" / "kaartdata_ats.json"
         static int AantalSteden();
         static std::string Bron();         // "embedded" or "downloaded"
 
