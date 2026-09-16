@@ -10,6 +10,7 @@
 #include "BusTracking.hxx"
 #include "DiscordWebhook.hxx"
 #include "VtcWebhook.hxx"
+#include "VtcBron.hxx"
 #include "FuelCosts.hxx"
 #include "IncidentRecorder.hxx"
 #include "WebApi.hxx"
@@ -40,7 +41,7 @@ namespace Ritten
     public:
         Overlay( TripLogger &logger, BusTracking &bus, TruckTracking &vracht,
                  PlayersNearby &spelers, FuelCosts &brandstof, DiscordWebhook &discord,
-                 VtcWebhook &vtc, IncidentRecorder &incident );
+                 VtcWebhook &vtc, VtcBron &vtcBron, IncidentRecorder &incident );
         ~Overlay();
 
         // Call as soon as Render().GetRendererID() == DirectX11 and a device
@@ -143,6 +144,7 @@ namespace Ritten
         FuelCosts &m_brandstof;
         DiscordWebhook &m_discord;
         VtcWebhook &m_vtc;
+        VtcBron &m_vtcBron;
 
         // Public TruckersMP Web API: server status and events. Owned by the
         // overlay itself, because only the statistics tab uses it.
@@ -258,6 +260,10 @@ namespace Ritten
         bool m_webhookBufferGeladen = false;
         char m_vtcUrlBuffer[ 512 ] = "";
         char m_vtcSleutelBuffer[ 256 ] = "";
+        char m_bronSleutelBuffer[ 256 ] = "";
+        bool m_bronBufferGeladen = false;
+        char m_hubGeheimBuffer[ 256 ] = "";
+        bool m_hubGeheimGeladen = false;
         bool m_vtcBuffersGeladen = false;
 
         // Appearance: transparency and accent colour, adjustable by the user

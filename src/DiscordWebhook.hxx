@@ -35,7 +35,8 @@ namespace Ritten
         // Safe to call from the game thread: puts the message on the send
         // queue and returns immediately. Does nothing if no (valid) webhook
         // URL is set or if it is switched off.
-        void StuurRitVoltooid( const Trip &trip );
+        // leegKm/leegKosten: the empty run before this job (0 = none/unknown).
+        void StuurRitVoltooid( const Trip &trip, double leegKm = 0.0, double leegKosten = 0.0 );
 
         // Send a test message manually (e.g. via a button in the overlay).
         // This one also goes onto the background queue.
@@ -60,7 +61,7 @@ namespace Ritten
 
         void WorkerLoop();
         void VerstuurBericht( const std::string &url, const std::string &jsonBody ) const;
-        std::string BouwEmbedJson( const Trip &trip ) const;
+        std::string BouwEmbedJson( const Trip &trip, double leegKm, double leegKosten ) const;
 
         struct WerkItem
         {

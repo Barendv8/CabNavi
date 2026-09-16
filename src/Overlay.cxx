@@ -284,9 +284,9 @@ namespace Ritten
 
     Overlay::Overlay( TripLogger &logger, BusTracking &bus, TruckTracking &vracht,
                        PlayersNearby &spelers, FuelCosts &brandstof, DiscordWebhook &discord,
-                       VtcWebhook &vtc, IncidentRecorder &incident )
+                       VtcWebhook &vtc, VtcBron &vtcBron, IncidentRecorder &incident )
         : m_logger( logger ), m_bus( bus ), m_vracht( vracht ), m_spelers( spelers ), m_brandstof( brandstof ),
-          m_discord( discord ), m_vtc( vtc ), m_incident( incident )
+          m_discord( discord ), m_vtc( vtc ), m_vtcBron( vtcBron ), m_incident( incident )
     {
         LaadUiterlijk();
         std::snprintf( m_prijsBuffer, sizeof( m_prijsBuffer ), "%.2f",
@@ -3482,7 +3482,7 @@ namespace Ritten
         }
 
         ImGui::Spacing();
-        TekstGedimd( T( "Voor het omrekenen naar kosten" ) );
+        TekstGedimd( T( "Reserve als tankbeurt en plek onbekend zijn" ) );
         ImGui::Spacing();
         ImGui::SetNextItemWidth( VeldBreedte() );
         const std::string prijsLabel = std::string( SpelInfo::Munt() )
@@ -3559,10 +3559,14 @@ namespace Ritten
         // VTC-webhook: same recipe as Discord, but towards the user's own
         // system. Height counted like everywhere: 3 dimmed text lines,
         // 4 widget rows (checkbox, URL, key, test button), 3 spacings.
+        const bool envelop = ( m_vtc.Formaat() == 1 );
+        // Counted: 3 dimmed texts (+1 hint for the secret), widgets = checkbox,
+        // URL, key, format combo, (secret), test button; 3 spacings.
+        // + live switch (1 field) and its warning (1 text).
         SectieStart( "VTC-WEBHOOK", ImVec4( 0.55f, 0.85f, 0.60f, 1.0f ),
-                      SectieHoogte( 3, 4, 3 ) );
+                      SectieHoogte( envelop ? 5 : 4, envelop ? 7 : 6, 3 ) );
         ImGui::Spacing();
-        ImGui::TextDisabled( T( "Stuurt elke afgeronde rit als JSON naar het systeem van je VTC." ) );
+        ImGui::TextDisabled( T( "Elke afgeronde rit als JSON naar je VTC" ) );
         ImGui::Spacing();
 
         if( !m_vtcBuffersGeladen )
@@ -3613,6 +3617,48 @@ namespace Ritten
             }
         }
         ImGui::TextDisabled( T( "Sleutel (gaat mee als Authorization: Bearer)" ) );
+
+        // Which shape the hub expects. The envelope format is for hubs that
+        // already receive { object, type, data } with a signed body.
+        {
+            static const char *formaten[] = { "CabNavi (open ritformaat)", "Envelop met handtekening" };
+            const int huidigF = std::clamp( m_vtc.Formaat(), 0, 1 );
+            if( ImGui::BeginCombo( T( "Formaat" ), T( formaten[ huidigF ] ) ) )
+            {
+                for( int i = 0; i < 2; ++i )
+                    if( ImGui::Selectable( T( formaten[ i ] ), huidigF == i ) ) { m_vtc.ZetFormaat( i ); m_vtcBuffersGeladen = false; }
+                ImGui::EndCombo();
+            }
+            if( envelop )
+            {
+                if( !m_hubGeheimGeladen )
+                {
+                    std::snprintf( m_hubGeheimBuffer, sizeof( m_hubGeheimBuffer ), "%s", m_vtc.HubGeheim().c_str() );
+                    m_hubGeheimGeladen = true;
+                }
+                ImGui::SetNextItemWidth( -( vtcKnop + 8.0f ) );
+                if( ImGui::InputText( "##hubgeheim", m_hubGeheimBuffer, sizeof( m_hubGeheimBuffer ), ImGuiInputTextFlags_Password ) )
+                    m_vtc.ZetHubGeheim( m_hubGeheimBuffer );
+                ImGui::SameLine();
+                if( ImGui::Button( ( std::string( T( "Plakken" ) ) + "##hubgeheimplak" ).c_str() ) )
+                {
+                    const std::string uitKlembord = LeesVanKlembord();
+                    if( !uitKlembord.empty() )
+                    {
+                        std::snprintf( m_hubGeheimBuffer, sizeof( m_hubGeheimBuffer ), "%s", uitKlembord.c_str() );
+                        m_vtc.ZetHubGeheim( m_hubGeheimBuffer );
+                    }
+                }
+                ImGui::TextDisabled( T( "Geheim van de hub, voor de handtekening" ) );
+            }
+        }
+
+        // Live position: off by default, and it says what it does.
+        {
+            bool live = m_vtc.LivePositie();
+            if( ImGui::Checkbox( T( "Positie live delen met mijn VTC" ), &live ) ) m_vtc.ZetLivePositie( live );
+            TekstGedimd( T( "Elke 10 s je plek naar het adres hierboven" ) );
+        }
 
         ImGui::Spacing();
         if( ImGui::Button( ( std::string( T( "Testbericht sturen" ) ) + "##vtctest" ).c_str() ) )
@@ -3847,24 +3893,76 @@ namespace Ritten
         snprintf( buf, sizeof( buf ), "%s %.0f", SpelInfo::Munt(), netto );
         statKaart( T( "NETTO" ), buf, true );
 
-        // --- Fuel this session --------------------------------------------
+        // --- Empty running and fuel bought, one box --------------------------
+        // Built exactly like the refuel box on the Live tab: card colour, a
+        // dimmed heading, text left, amount right. Height counted per line.
         {
+            const FuelCosts::LeegRijden leeg = m_brandstof.LeegTotaal();
             const int aantal = m_brandstof.AantalTankbeurten();
-            if( aantal > 0 )
-            {
-                const double liters = m_brandstof.TotaalGetanktLiters();
-                const double kosten = liters * m_brandstof.PrijsPerLiter();
+            const FuelCosts::PrijsInfo prijs = m_brandstof.HuidigePrijsInfo();
 
-                ImGui::Spacing();
-                if( m_kleinFont ) { ImGui::PushFont( m_kleinFont ); m_kleinFontActief = true; }
-                TekstGedimdFmt( Eenheden::Imperiaal() ? T( "Getankt: %dx, %.0f gallon, %s %.0f" )
-                                                        : T( "Getankt: %dx, %.0f liter, %s %.0f" ),
-                                 aantal, Eenheden::Liters( liters ), SpelInfo::Munt(), kosten );
-                TekstGedimdFmt( Eenheden::Imperiaal() ? T( "%s %.2f per gallon (zelf ingesteld)" )
-                                                     : T( "%s %.2f per liter (zelf ingesteld)" ),
-                                 SpelInfo::Munt(), Eenheden::PrijsPerVolume( m_brandstof.PrijsPerLiter() ) );
-                if( m_kleinFont ) { ImGui::PopFont(); m_kleinFontActief = false; }
+            if( m_kleinFont ) { ImGui::PushFont( m_kleinFont ); m_kleinFontActief = true; }
+            const ImGuiStyle &stK = ImGui::GetStyle();
+            const float regelK = ImGui::GetTextLineHeight() + 3.0f;
+
+            // Lines: heading + 2 for empty running; heading + 2 (+1 when the
+            // price has a place) for fuel bought when there was any.
+            int regels = 3;
+            const bool metTanken = aantal > 0;
+            if( metTanken ) regels += 3 + ( prijs.land.empty() ? 0 : 1 );
+
+            auto regelLR = [ & ]( const std::string &links, const std::string &rechts )
+            {
+                const float breed = ImGui::GetContentRegionAvail().x;
+                TekstS( links.c_str() );
+                const float rb = ImGui::CalcTextSize( rechts.c_str() ).x;
+                ImGui::SameLine( 0.0f, 0.0f );
+                ImGui::SetCursorPosX( ImGui::GetCursorPosX() +
+                                       std::max( 8.0f, breed - rb - ImGui::GetCursorPosX() + stK.WindowPadding.x ) );
+                TekstGedimd( rechts.c_str() );
+            };
+            auto munt = [ & ]( double v, int dec )
+            {
+                char b[ 32 ];
+                std::snprintf( b, sizeof( b ), dec == 2 ? "%s %.2f" : "%s %.0f", SpelInfo::Munt(), v );
+                return std::string( b );
+            };
+
+            ImGui::Spacing();
+            ImGui::PushStyleColor( ImGuiCol_ChildBg, KaartKleur() );
+            ImGui::BeginChild( "stat_kostenvak", ImVec2( 0, stK.WindowPadding.y * 2.0f + regels * regelK + 4.0f ),
+                                true, ImGuiWindowFlags_NoScrollbar );
+
+            TekstGedimd( T( "LEEG GEREDEN" ) );
+            {
+                char l[ 64 ];
+                std::snprintf( l, sizeof( l ), "%.0f %s \xc2\xb7 %.0f %s", Eenheden::Km( leeg.km ), Eenheden::AfstandLabel(),
+                               Eenheden::Liters( leeg.liters ), Eenheden::VolumeLabel() );
+                regelLR( l, munt( leeg.kosten, 0 ) );
+                regelLR( T( "Netto na leeg rijden" ), munt( netto - leeg.kosten, 0 ) );
             }
+
+            if( metTanken )
+            {
+                TekstGedimd( T( "GETANKT" ) );
+                char l[ 64 ];
+                std::snprintf( l, sizeof( l ), "%dx \xc2\xb7 %.0f %s", aantal,
+                               Eenheden::Liters( m_brandstof.TotaalGetanktLiters() ), Eenheden::VolumeLabel() );
+                regelLR( l, munt( m_brandstof.TotaalGetanktKosten(), 0 ) );
+                const char *bronTekst = prijs.bron == 0 ? T( "Prijs laatste tankbeurt" )
+                                      : prijs.bron == 1 ? T( "Prijs hier" ) : T( "Prijs ingesteld" );
+                regelLR( bronTekst, munt( Eenheden::PrijsPerVolume( prijs.prijs ), 2 ) );
+                if( !prijs.land.empty() )
+                {
+                    std::string plek = prijs.land;
+                    if( !plek.empty() ) plek[ 0 ] = (char)std::toupper( (unsigned char)plek[ 0 ] );
+                    if( prijs.garage ) plek += std::string( " \xc2\xb7 " ) + T( "eigen garage" );
+                    TekstGedimd( plek.c_str() );
+                }
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            if( m_kleinFont ) { ImGui::PopFont(); m_kleinFontActief = false; }
         }
 
         // The three lines about trips.jsonl and dashboard.html used to be
@@ -4569,6 +4667,119 @@ namespace Ritten
 
     void Overlay::TekenVtcTab()
     {
+        // ---- Company system (bot / Trucky / Horizon / TruckersHub) --------
+        // Drawn above the TruckersMP part, and only when a source is chosen.
+        if( m_vtcBron.Type() != VtcBronType::Geen )
+        {
+            const VtcOverzicht o = m_vtcBron.Overzicht();
+            ImGui::Spacing();
+            KopBalk( o.bronNaam.empty() ? T( "BRON" ) : o.bronNaam.c_str() );
+
+            if( !o.geldig )
+            {
+                TekstGedimd( o.status.empty() ? T( "Ophalen..." ) : o.status.c_str() );
+            }
+            else
+            {
+                const float halfB = ( ImGui::GetContentRegionAvail().x - 8 ) / 2.0f;
+                std::string onder = o.tag.empty() ? std::string() : ( std::string( T( "tag " ) ) + o.tag );
+                StatKaart( T( "BEDRIJF" ), o.bedrijf.empty() ? "-" : o.bedrijf, halfB, onder.c_str() );
+                ImGui::SameLine();
+                if( !o.mijnNaam.empty() )
+                {
+                    char km[ 48 ]; std::snprintf( km, sizeof( km ), "%.0f km", Eenheden::Km( o.mijnKm ) );
+                    StatKaart( T( "IK" ), o.mijnNaam, halfB, o.mijnRol.empty() ? km : o.mijnRol.c_str() );
+                }
+                else
+                    StatKaart( T( "LEDEN" ), std::to_string( o.leden ), halfB, T( "chauffeurs" ) );
+
+                if( m_kleinFont ) { ImGui::PushFont( m_kleinFont ); m_kleinFontActief = true; }
+                const float regelB = ImGui::GetTextLineHeight() + 4.0f;
+
+                // Jobs first: that is what a driver wants to see.
+                if( !o.opdrachten.empty() )
+                {
+                    const int n = (int)std::min<std::size_t>( o.opdrachten.size(), 5 );
+                    int regels = 1;   // the heading
+                    for( int i = 0; i < n; ++i )
+                    {
+                        const Opdracht &op = o.opdrachten[ i ];
+                        regels += 1 + ( ( !op.lading.empty() || !op.deadline.empty() || op.status == "accepted" ) ? 1 : 0 );
+                    }
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor( ImGuiCol_ChildBg, KaartKleur() );
+                    ImGui::BeginChild( "##bronopdrachten", ImVec2( 0, regelB * regels + 12 ), true, ImGuiWindowFlags_NoScrollbar );
+                    TekstGedimd( T( "OPDRACHTEN" ) );
+                    for( int i = 0; i < n; ++i )
+                    {
+                        const Opdracht &op = o.opdrachten[ i ];
+                        ImGui::Text( "%s -> %s", op.vertrek.c_str(), op.aankomst.c_str() );
+                        std::string sub = op.lading;
+                        if( !op.deadline.empty() ) sub += ( sub.empty() ? "" : "  |  " ) + op.deadline;
+                        if( op.status == "accepted" ) sub += ( sub.empty() ? "" : "  |  " ) + std::string( T( "geaccepteerd" ) );
+                        if( !sub.empty() ) TekstGedimd( sub.c_str() );
+                        if( op.accepteerbaar )
+                        {
+                            ImGui::SameLine( ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize( T( "Accepteren" ) ).x - 8 );
+                            if( ImGui::SmallButton( ( std::string( T( "Accepteren" ) ) + "##op" + op.id ).c_str() ) )
+                                m_vtcBron.AccepteerOpdracht( op.id );
+                        }
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                }
+
+                if( !o.online.empty() )
+                {
+                    std::string regel = std::string( T( "Online: " ) );
+                    for( std::size_t i = 0; i < o.online.size() && i < 6; ++i ) regel += ( i ? ", " : "" ) + o.online[ i ];
+                    if( o.online.size() > 6 ) regel += " +" + std::to_string( o.online.size() - 6 );
+                    ImGui::Spacing();
+                    TekstGedimd( regel.c_str() );
+                }
+
+                if( !o.convooien.empty() )
+                {
+                    const int n = (int)std::min<std::size_t>( o.convooien.size(), 4 );
+                    int regels = 1;
+                    for( int i = 0; i < n; ++i )
+                    {
+                        const BronConvooi &k = o.convooien[ i ];
+                        regels += 1 + ( ( !k.start.empty() || !k.vertrek.empty() ) ? 1 : 0 );
+                    }
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor( ImGuiCol_ChildBg, KaartKleur() );
+                    ImGui::BeginChild( "##bronconvooien", ImVec2( 0, regelB * regels + 12 ), true, ImGuiWindowFlags_NoScrollbar );
+                    TekstGedimd( T( "CONVOOIEN" ) );
+                    for( int i = 0; i < n; ++i )
+                    {
+                        const BronConvooi &k = o.convooien[ i ];
+                        ImGui::Text( "%s", k.titel.empty() ? "-" : k.titel.c_str() );
+                        std::string sub = k.start;
+                        if( !k.vertrek.empty() ) sub += ( sub.empty() ? "" : "  |  " ) + k.vertrek + " -> " + k.aankomst;
+                        if( !sub.empty() ) TekstGedimd( sub.c_str() );
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                }
+
+                if( !o.nieuws.empty() )
+                {
+                    const int n = (int)std::min<std::size_t>( o.nieuws.size(), 3 );
+                    ImGui::Spacing();
+                    ImGui::PushStyleColor( ImGuiCol_ChildBg, KaartKleur() );
+                    ImGui::BeginChild( "##bronnieuws", ImVec2( 0, regelB * ( 1 + n ) + 12 ), true, ImGuiWindowFlags_NoScrollbar );
+                    TekstGedimd( T( "NIEUWS" ) );
+                    for( int i = 0; i < n; ++i ) ImGui::Text( "%s", o.nieuws[ i ].titel.c_str() );
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                }
+
+                if( m_kleinFontActief ) { ImGui::PopFont(); m_kleinFontActief = false; }
+            }
+            ImGui::Spacing();
+        }
+
         if( !m_vtcAan || m_vtcId <= 0 )
         {
             ImGui::Spacing();
@@ -4767,5 +4978,70 @@ namespace Ritten
             }
         }
         SectieEind();
+
+        // ---- Which system fills the VTC tab ------------------------------
+        // Heights counted like everywhere: 2 dimmed text lines, up to 3
+        // widget rows (combo, key, note), 3 spacings. Trucky needs no key,
+        // so its block is one row shorter.
+        {
+            const VtcBronType huidig = m_vtcBron.Type();
+            const bool metSleutel = ( huidig == VtcBronType::Horizon || huidig == VtcBronType::TruckersHub
+                                      || huidig == VtcBronType::Trucky || huidig == VtcBronType::Vtlog );
+            // Counted, not guessed (the UITERLIJK lesson): intro text, one
+            // hint text when a source is chosen, the combo, the key row only
+            // when the source takes a key, and the two Spacing() calls.
+            const int tekstRegels = 1 + ( huidig == VtcBronType::Geen ? 0 : 1 );
+            const int velden = 1 + ( metSleutel ? 1 : 0 );
+            SectieStart( "VTC-BRON", ImVec4( 0.55f, 0.85f, 0.60f, 1.0f ),
+                          SectieHoogte( tekstRegels, velden, 2 ) );
+            ImGui::Spacing();
+            ImGui::TextDisabled( T( "Waar leeft je bedrijf? Dat vult de VTC-tab." ) );
+            ImGui::Spacing();
+
+            static const char *keuzes[] = { "Geen", "CabNavi bot (dispatch)", "Trucky", "Horizon Dispatch", "TruckersHub", "VTLog" };
+            int keuze = static_cast<int>( huidig );
+            if( ImGui::BeginCombo( T( "Bron" ), T( keuzes[ std::clamp( keuze, 0, 5 ) ] ) ) )
+            {
+                for( int i = 0; i < 6; ++i )
+                    if( ImGui::Selectable( T( keuzes[ i ] ), keuze == i ) )
+                    {
+                        m_vtcBron.ZetType( static_cast<VtcBronType>( i ) );
+                        m_bronBufferGeladen = false;
+                    }
+                ImGui::EndCombo();
+            }
+
+            if( metSleutel )
+            {
+                if( !m_bronBufferGeladen )
+                {
+                    std::snprintf( m_bronSleutelBuffer, sizeof( m_bronSleutelBuffer ), "%s", m_vtcBron.Sleutel().c_str() );
+                    m_bronBufferGeladen = true;
+                }
+                float knopB = ImGui::CalcTextSize( T( "Plakken" ) ).x + 20.0f;
+                ImGui::SetNextItemWidth( -( knopB + 8.0f ) );
+                if( ImGui::InputText( "##bronsleutel", m_bronSleutelBuffer, sizeof( m_bronSleutelBuffer ), ImGuiInputTextFlags_Password ) )
+                    m_vtcBron.ZetSleutel( m_bronSleutelBuffer );
+                ImGui::SameLine();
+                if( ImGui::Button( ( std::string( T( "Plakken" ) ) + "##bronplak" ).c_str() ) )
+                {
+                    const std::string uitKlembord = LeesVanKlembord();
+                    if( !uitKlembord.empty() )
+                    {
+                        std::snprintf( m_bronSleutelBuffer, sizeof( m_bronSleutelBuffer ), "%s", uitKlembord.c_str() );
+                        m_vtcBron.ZetSleutel( m_bronSleutelBuffer );
+                    }
+                }
+                if( huidig == VtcBronType::Horizon )          TekstGedimd( T( "Publieke pk_-sleutel (Dashboard > API)" ) );
+                else if( huidig == VtcBronType::TruckersHub ) TekstGedimd( T( "Bedrijfstoken: geheim, kan leden wissen" ) );
+                else if( huidig == VtcBronType::Vtlog )       TekstGedimd( T( "Optioneel: VTC-sleutel voor leden en live" ) );
+                else                                          TekstGedimd( T( "Optioneel: bedrijfstoken voor evenementen" ) );
+            }
+            else if( huidig == VtcBronType::Trucky )
+                TekstGedimd( T( "Vindt je account zelf via je Steam-ID" ) );
+            else if( huidig == VtcBronType::Bot )
+                TekstGedimd( T( "Gebruikt adres en sleutel van de VTC-webhook" ) );
+            SectieEind();
+        }
     }
 }

@@ -2,6 +2,7 @@
 #include "Kaartdata.hxx"
 #include "Logboek.hxx"
 #include "ScsArchief.hxx"
+#include "Spel.hxx"
 
 #include <nlohmann/json.hpp>
 
@@ -36,6 +37,7 @@ namespace Ritten
     {
         LaadInstellingen();
         LaadPrijzenPerLand();
+        LaadTruckPrijzen();
     }
 
     void FuelCosts::LaadInstellingen()
@@ -86,9 +88,24 @@ namespace Ritten
         return m_getanktTotaalLiters;
     }
 
+    double FuelCosts::TotaalGetanktKosten() const
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        return m_getanktTotaalKosten;
+    }
+
     void FuelCosts::ZetKilometerstand( double km )
     {
         std::lock_guard<std::mutex> lock( m_mutex );
+        // Empty kilometres: odometer steps while no job runs. The same
+        // sanity rule as the distance measurement: a step over 5 km is a
+        // reload or a teleport, not driving.
+        if( m_kmVorig >= 0.0 && !m_ritActief )
+        {
+            const double stap = km - m_kmVorig;
+            if( stap > 0.0 && stap < 5.0 ) { m_leeg.km += stap; m_leegSindsVorigeRit.km += stap; }
+        }
+        m_kmVorig = km;
         m_kmStand = km;
     }
 
@@ -249,6 +266,10 @@ namespace Ritten
         m_litersBijRitStart = m_state.huidigeLiters;
         m_state.verbruikSindsRitStartLiters = 0.0;
         m_state.kostenDezeRitEuro = 0.0;
+        m_kostenBijRitStart = m_kostenTeller;
+        m_leegVoorDezeRit = m_leegSindsVorigeRit;   // the empty run that led to this job
+        m_leegSindsVorigeRit = LeegRijden{};
+        m_ritActief = true;
 
         // Also clear the refuelling list: that belongs to THIS trip. The
         // totals stay, because they cover the whole session.
@@ -284,6 +305,7 @@ namespace Ritten
                 else m_litersBijRitStart -= m_vorigNiveau - liters;
                 m_open.actief = false;
                 m_vorigNiveau = liters;
+                m_vorigNiveauVoorKosten = liters;   // the other truck's tank is a new baseline for cost too
                 m_state.huidigeLiters = liters;
                 m_state.tankInhoudLiters = tankInhoud;
                 m_state.verbruikSindsRitStartLiters = std::max( 0.0, m_litersBijRitStart - liters );
@@ -317,12 +339,20 @@ namespace Ritten
                 {
                     std::string l, st; bool g = false;
                     BepaalLand( l, st, g );
-                    if( !l.empty() ) { land = l; t.stad = st; }
+                    if( !l.empty() ) { land = l; t.stad = st; m_laatstBekendLand = l; m_laatstBekendeStad = st; }
                     // Refuelling inside a large-garage yard is only possible at
                     // your OWN garage: that pump is the owner discount.
                     // MEASURED 04-09: x0.85 in NL and DE, to the cent -- and
                     // economy_data.sii says fuel_discount_in_garage: 0.15.
                     t.garage = g;
+                }
+                // Position momentarily unknown (loading screen, right after a
+                // teleport): the last known country is a far better guess than
+                // the manual price.
+                if( land.empty() && m_instellingen.landAutomatisch && !m_laatstBekendLand.empty() )
+                {
+                    land = m_laatstBekendLand;
+                    t.stad = m_laatstBekendeStad;
                 }
                 double prijs = m_instellingen.prijsPerLiterEuro;
                 if( !land.empty() )
@@ -354,10 +384,27 @@ namespace Ritten
         }
         m_vorigNiveau = liters;
 
+        // Litres burnt since the previous reading, priced at THIS moment:
+        // the last refuel of this truck, else the price here, else manual.
+        // (The refuel branch above returned before reaching this point.)
+        if( m_vorigNiveauVoorKosten >= 0.0 && liters < m_vorigNiveauVoorKosten
+            && m_vorigNiveauVoorKosten - liters < 20.0 )   // more than 20 L between two readings is a reload, not driving
+        {
+            const double delta = m_vorigNiveauVoorKosten - liters;
+            const double prijs = PrijsInfoOnderSlot().prijs;
+            m_kostenTeller += delta * prijs;
+            if( !m_ritActief )
+            {
+                m_leeg.liters += delta;               m_leeg.kosten += delta * prijs;
+                m_leegSindsVorigeRit.liters += delta; m_leegSindsVorigeRit.kosten += delta * prijs;
+            }
+        }
+        m_vorigNiveauVoorKosten = liters;
+
         m_state.huidigeLiters = liters;
         m_state.tankInhoudLiters = tankInhoud;
         m_state.verbruikSindsRitStartLiters = std::max( 0.0, m_litersBijRitStart - liters );
-        m_state.kostenDezeRitEuro = m_state.verbruikSindsRitStartLiters * m_instellingen.prijsPerLiterEuro;
+        m_state.kostenDezeRitEuro = m_kostenTeller - m_kostenBijRitStart;
     }
 
     double FuelCosts::SluitRitAf()
@@ -367,6 +414,7 @@ namespace Ritten
         double kosten = m_state.kostenDezeRitEuro;
         m_state.totaalVerbruikLiters += m_state.verbruikSindsRitStartLiters;
         m_state.totaalKostenEuro += kosten;
+        m_ritActief = false;
         return kosten;
     }
 
@@ -395,6 +443,117 @@ namespace Ritten
         if( m_tankbeurten.size() > 10 ) m_tankbeurten.pop_back();
         ++m_tankbeurtenTotaal;
         m_getanktTotaalLiters += t.liters;
+        m_getanktTotaalKosten += t.kostenEuro;
+
+        // From now on this truck burns litres at THIS price.
+        if( !m_voertuigSleutel.empty() )
+        {
+            TruckPrijs tp; tp.prijs = t.prijsPerLiter; tp.land = t.land; tp.stad = t.stad; tp.garage = t.garage;
+            m_truckPrijzen[ m_voertuigSleutel ] = tp;
+            BewaarTruckPrijzen();
+        }
+    }
+
+    // --- Price per truck ------------------------------------------------------
+    std::filesystem::path FuelCosts::TruckPrijzenPad()
+    {
+        return InstellingenPad().parent_path() / "brandstof_trucks.json";
+    }
+
+    void FuelCosts::LaadTruckPrijzen()
+    {
+        try
+        {
+            std::ifstream in( TruckPrijzenPad() );
+            if( !in ) return;
+            nlohmann::json j; in >> j;
+            std::lock_guard<std::mutex> lock( m_mutex );
+            for( auto it = j.begin(); it != j.end(); ++it )
+            {
+                if( !it.value().is_object() ) continue;
+                TruckPrijs tp;
+                tp.prijs  = it.value().value( "prijs", 0.0 );
+                tp.land   = it.value().value( "land", std::string() );
+                tp.stad   = it.value().value( "stad", std::string() );
+                tp.garage = it.value().value( "garage", false );
+                if( tp.prijs > 0.0 ) m_truckPrijzen[ it.key() ] = tp;
+            }
+        }
+        catch( ... ) { /* a broken file equals no file */ }
+    }
+
+    void FuelCosts::BewaarTruckPrijzen() const
+    {
+        try
+        {
+            nlohmann::json j = nlohmann::json::object();
+            for( const auto &[ sleutel, tp ] : m_truckPrijzen )
+                j[ sleutel ] = { { "prijs", tp.prijs }, { "land", tp.land }, { "stad", tp.stad }, { "garage", tp.garage } };
+            std::ofstream uit( TruckPrijzenPad() );
+            if( uit ) uit << j.dump( 2 );
+        }
+        catch( ... ) { /* saving must never disturb the game */ }
+    }
+
+    void FuelCosts::ZetVoertuigSleutel( const std::string &sleutel )
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        // Per game: a Scania only ever drives in ETS2, but the key says so
+        // explicitly so a shared file can never mix euros and dollars.
+        m_voertuigSleutel = std::string( SpelInfo::IsAts() ? "ats|" : "ets2|" ) + sleutel;
+    }
+
+    FuelCosts::PrijsInfo FuelCosts::PrijsInfoOnderSlot() const
+    {
+        PrijsInfo p;
+        // 1. The last refuel of this truck.
+        if( !m_voertuigSleutel.empty() )
+        {
+            const auto it = m_truckPrijzen.find( m_voertuigSleutel );
+            if( it != m_truckPrijzen.end() && it->second.prijs > 0.0 )
+            {
+                p.prijs = it->second.prijs; p.bron = 0;
+                p.land = it->second.land; p.stad = it->second.stad; p.garage = it->second.garage;
+                return p;
+            }
+        }
+        // 2. The price where you are right now (same rule as a refuel here).
+        if( m_instellingen.landAutomatisch && m_posBekend )
+        {
+            std::string land, stad; bool garage = false;
+            BepaalLand( land, stad, garage );
+            if( !land.empty() )
+            {
+                const auto it = m_prijsPerLand.find( land );
+                if( it != m_prijsPerLand.end() )
+                {
+                    p.prijs = it->second * ( garage ? ( 1.0 - m_garageKorting ) : 1.0 );
+                    p.bron = 1; p.land = land; p.stad = stad; p.garage = garage;
+                    return p;
+                }
+            }
+        }
+        // 3. The manual setting.
+        p.prijs = m_instellingen.prijsPerLiterEuro; p.bron = 2;
+        return p;
+    }
+
+    FuelCosts::PrijsInfo FuelCosts::HuidigePrijsInfo() const
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        return PrijsInfoOnderSlot();
+    }
+
+    FuelCosts::LeegRijden FuelCosts::LeegTotaal() const
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        return m_leeg;
+    }
+
+    FuelCosts::LeegRijden FuelCosts::LeegVoorDezeRit() const
+    {
+        std::lock_guard<std::mutex> lock( m_mutex );
+        return m_leegVoorDezeRit;
     }
 
     void FuelCosts::VoertuigGewisseld()

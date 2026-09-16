@@ -80,6 +80,7 @@ namespace Ritten
         // Totals over all trips since startup.
         int AantalTankbeurten() const;
         double TotaalGetanktLiters() const;
+        double TotaalGetanktKosten() const;   // real money at the pump, all stops this session
 
         // Pass on the odometer, so a refuelling stop knows where it was.
         void ZetKilometerstand( double km );
@@ -121,6 +122,37 @@ namespace Ritten
         // MEASURED 05-09 00:49: Volvo -> Scania logged a 5.6 L "refuel" at the
         // garage. Called by TruckTracking on a truck configuration change.
         void VoertuigGewisseld();
+
+        // --- Price per truck: you burn what you tanked ------------------------
+        // Once TruckTracking has recognised the truck (brand, model, and which
+        // of two identical ones) it hands over a stable key. The price of the
+        // last refuel of THAT truck is what its litres cost from then on; a
+        // truck never refuelled with CabNavi falls back to the price where you
+        // are now, and only then to the manual setting. Kept per game in
+        // brandstof_trucks.json.
+        void ZetVoertuigSleutel( const std::string &sleutel );
+
+        struct PrijsInfo
+        {
+            double prijs = 0.0;
+            int bron = 2;              // 0 = last refuel of this truck, 1 = price here, 2 = manual
+            std::string land, stad;    // where that price came from, when known
+            bool garage = false;
+        };
+        PrijsInfo HuidigePrijsInfo() const;
+
+        // --- Empty running: every litre costs, loaded or not ------------------
+        // Litres burnt while no job is running, priced the same way. Per
+        // session, like the refuel totals. `VoorDezeRit` is the empty run
+        // between the previous job's end and this job's start.
+        struct LeegRijden
+        {
+            double km = 0.0;
+            double liters = 0.0;
+            double kosten = 0.0;
+        };
+        LeegRijden LeegTotaal() const;
+        LeegRijden LeegVoorDezeRit() const;
 
         // --- Position -> country, garage -------------------------------------
         // World X/Z of the truck, from the TruckersMP SDK (the radar already
@@ -166,6 +198,7 @@ namespace Ritten
         std::vector<Tankbeurt> m_tankbeurten;  // this trip
         int m_tankbeurtenTotaal = 0;
         double m_getanktTotaalLiters = 0.0;
+        double m_getanktTotaalKosten = 0.0;
         double m_kmStand = 0.0;
         std::string m_huidigLand;
         std::map<std::string, double> m_prijsPerLand;
@@ -192,6 +225,27 @@ namespace Ritten
         // Position (game thread writes, game thread reads at refuel time).
         double m_posX = 0.0, m_posZ = 0.0;
         bool m_posBekend = false;
+        std::string m_laatstBekendLand, m_laatstBekendeStad;   // for a refuel while the position is momentarily unknown
+
+        // Per-truck last refuel price (see ZetVoertuigSleutel).
+        struct TruckPrijs { double prijs = 0.0; std::string land, stad; bool garage = false; };
+        std::string m_voertuigSleutel;
+        std::map<std::string, TruckPrijs> m_truckPrijzen;
+        void LaadTruckPrijzen();
+        void BewaarTruckPrijzen() const;      // caller holds m_mutex
+        static std::filesystem::path TruckPrijzenPad();
+        PrijsInfo PrijsInfoOnderSlot() const; // caller holds m_mutex
+
+        // Cost is summed per litre burnt, at the price of that moment, so a
+        // refuel halfway a trip or a teleport never re-prices earlier litres.
+        double m_kostenTeller = 0.0;          // since start, all litres
+        double m_kostenBijRitStart = 0.0;
+        bool m_ritActief = false;
+        LeegRijden m_leeg;                    // since start
+        LeegRijden m_leegSindsVorigeRit;      // grows between jobs, snapshotted at job start
+        LeegRijden m_leegVoorDezeRit;
+        double m_kmVorig = -1.0;              // for empty km
+        double m_vorigNiveauVoorKosten = -1.0; // level at the previous costed reading
 
         // Price file provenance.
         std::string m_prijzenVersie;   // "_versie" in the file, empty = indicative defaults

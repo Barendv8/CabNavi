@@ -27,9 +27,13 @@
 #include "TripLogger.hxx"
 #include "TruckTracking.hxx"
 #include "VtcWebhook.hxx"
+#include "VtcBron.hxx"
+#include "RitGeheugen.hxx"
+#include "SpelConfig.hxx"
 
 #include <cstdlib>
 #include <filesystem>
+#include <algorithm>
 #include <memory>
 #include <vector>
 #include <system_error>
@@ -41,6 +45,10 @@ namespace
     std::unique_ptr<Ritten::FuelCosts> g_brandstof;
     std::unique_ptr<Ritten::DiscordWebhook> g_discord;
     std::unique_ptr<Ritten::VtcWebhook> g_vtcWebhook;
+    std::unique_ptr<Ritten::VtcBron> g_vtcBron;
+    std::unique_ptr<Ritten::RitGeheugen> g_ritGeheugen;
+    std::unique_ptr<Ritten::SpelConfig> g_spelConfig;
+    bool g_ritWasActief = false;
     std::unique_ptr<Ritten::IncidentRecorder> g_incidentRecorder;
     std::unique_ptr<Ritten::BusTracking> g_busTracking;
     std::unique_ptr<Ritten::TruckTracking> g_vrachtTracking;
@@ -131,7 +139,7 @@ namespace
 
         g_overlay = std::make_unique<Ritten::Overlay>(
             *g_logger, *g_busTracking, *g_vrachtTracking, *g_spelers, *g_brandstof, *g_discord,
-            *g_vtcWebhook, *g_incidentRecorder );
+            *g_vtcWebhook, *g_vtcBron, *g_incidentRecorder );
 
         HWND spelVenster = ZoekSpelvenster();
         if( spelVenster == nullptr )
@@ -177,6 +185,42 @@ namespace
                 // its own brake, so this does not cost work every frame.
                 g_spelers->VerversPosities();
                 g_incidentRecorder->Tick( g_spelers->GeefSpelers() );
+
+                // The VTC source needs to know who we are; cheap, and it
+                // only reacts when the value actually changes.
+                if( g_vtcBron )
+                    if( const auto lokaal = g_session->Player().GetLocalPlayer() )
+                        g_vtcBron->ZetEigenSteamId( lokaal->GetSteamID().value_or( 0 ) );
+
+                // The trip's memory: feed it what already exists (speed, limit,
+                // own position, trip active). It measures nothing itself.
+                if( g_ritGeheugen && g_vrachtTracking )
+                {
+                    const bool actief = g_vrachtTracking->HeeftActieveRit();
+                    if( actief && !g_ritWasActief && g_spelConfig ) g_spelConfig->Laad();   // settings as they are at THIS trip
+                    g_ritWasActief = actief;
+                    double x = 0.0, z = 0.0;
+                    const bool posBekend = g_spelers->EigenPositie( x, z );
+                    g_ritGeheugen->Voed( g_vrachtTracking->LiveSnelheidKmh(),
+                                         g_vrachtTracking->HuidigeVoertuigStatus().snelheidslimietKmh,
+                                         posBekend, x, z, actief );
+
+                    // Live position for the company system (only sent when the
+                    // driver switched it on; the webhook decides, we just feed).
+                    if( g_vtcWebhook && g_vtcWebhook->LivePositie() )
+                    {
+                        Ritten::VtcWebhook::LiveStand stand;
+                        stand.bekend = posBekend; stand.x = x; stand.z = z;
+                        stand.snelheidKmh = g_vrachtTracking->LiveSnelheidKmh();
+                        stand.opRit = actief;
+                        if( actief )
+                        {
+                            const auto &rit = g_vrachtTracking->HuidigeRit();
+                            stand.van = rit.bronStad; stand.naar = rit.bestemmingStad; stand.server = rit.serverNaam;
+                        }
+                        g_vtcWebhook->ZetLive( stand );
+                    }
+                }
             }
 
             // Stay out of the way while you are not in the world.
@@ -475,6 +519,10 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
     g_brandstof = std::make_unique<Ritten::FuelCosts>();
     g_discord = std::make_unique<Ritten::DiscordWebhook>();
     g_vtcWebhook = std::make_unique<Ritten::VtcWebhook>();
+    g_vtcBron = std::make_unique<Ritten::VtcBron>( *g_vtcWebhook );
+    g_ritGeheugen = std::make_unique<Ritten::RitGeheugen>();
+    g_spelConfig = std::make_unique<Ritten::SpelConfig>();
+    g_spelConfig->Laad();
     g_incidentRecorder = std::make_unique<Ritten::IncidentRecorder>();
 
     // Every time a trip is completed/cancelled, also try to send a
@@ -482,7 +530,10 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
     // and whether a URL is set -- we do not need to care here).
     g_logger->ZetVoltooidCallback( []( const Ritten::Trip &trip )
     {
-        g_discord->StuurRitVoltooid( trip );
+        // Priced fuel and the empty run before this job, from FuelCosts.
+        const auto leeg = g_brandstof ? g_brandstof->LeegVoorDezeRit() : Ritten::FuelCosts::LeegRijden{};
+        const auto prijs = g_brandstof ? g_brandstof->HuidigePrijsInfo() : Ritten::FuelCosts::PrijsInfo{};
+        g_discord->StuurRitVoltooid( trip, leeg.km, leeg.kosten );
 
         // The VTC webhook gets the tachograph state of THIS moment as well.
         // Read-only getters on TruckTracking; when tracking is not there
@@ -494,7 +545,44 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host *host, TruckersMP
             tacho.rijMinutenSindsRust = g_vrachtTracking->TachograafRijtijdMinuten();
             tacho.inRust = g_vrachtTracking->TachograafInRust();
         }
-        g_vtcWebhook->StuurRit( trip, tacho );
+        Ritten::VtcWebhook::RitContext ctx;
+        ctx.prijsPerLiter = prijs.prijs; ctx.prijsBron = prijs.bron;
+        ctx.leegKm = leeg.km; ctx.leegLiters = leeg.liters; ctx.leegKosten = leeg.kosten;
+
+        // For the envelope format: who we are, which game, the truck's
+        // state at this moment, and the refuels of this trip.
+        ctx.hub.game = Ritten::SpelInfo::IsAts() ? "ats" : "eut2";
+        if( g_session )
+            if( const auto lokaal = g_session->Player().GetLocalPlayer() )
+            {
+                ctx.hub.steamId = lokaal->GetSteamID().value_or( 0 );
+                ctx.hub.spelerNaam = lokaal->GetUsername().value_or( std::string() );
+                if( const auto id = lokaal->GetPlayerID() ) ctx.hub.tmpSpelerId = std::to_string( *id );
+            }
+        if( g_vrachtTracking )
+        {
+            const auto vs = g_vrachtTracking->HuidigeVoertuigStatus();
+            ctx.hub.kmStandEind = std::max( 0.0, vs.kilometerstandKm );
+            ctx.hub.schadeCabine = std::max( 0.0, vs.schadeCabine ); ctx.hub.schadeChassis = std::max( 0.0, vs.schadeChassis );
+            ctx.hub.schadeMotor = std::max( 0.0, vs.schadeMotor );   ctx.hub.schadeBak = std::max( 0.0, vs.schadeBak );
+            ctx.hub.schadeWielen = std::max( 0.0, vs.schadeWielen );
+            ctx.hub.aanhangerSchade = std::max( 0.0, vs.aanhangerSchade ); ctx.hub.ladingSchade = std::max( 0.0, vs.ladingSchade );
+        }
+        ctx.hub.brandstofPrijsPerLiter = prijs.prijs;
+        if( g_ritGeheugen )
+        {
+            ctx.hub.topKmh = g_ritGeheugen->TopSnelheidKmh();
+            for( const auto &pt : g_ritGeheugen->Route() ) ctx.hub.route.push_back( { pt.tijd, pt.x, pt.z } );
+            for( const auto &ov : g_ritGeheugen->Overtredingen() )
+                ctx.hub.overtredingen.push_back( { ov.maxKmh, ov.limietKmh, ov.start, ov.eind, ov.x, ov.z } );
+            ctx.hub.teleports = g_ritGeheugen->Teleports();
+        }
+        if( g_spelConfig ) ctx.hub.realistischeInstellingen = g_spelConfig->RealistischeInstellingen();
+        if( g_vrachtTracking ) { ctx.hub.kenteken = g_vrachtTracking->Kenteken(); ctx.hub.kentekenLand = g_vrachtTracking->KentekenLand(); }
+        if( g_brandstof )
+            for( const auto &t : g_brandstof->TankbeurtenDezeRit() )
+                ctx.hub.tankbeurten.push_back( { t.liters, t.kostenEuro } );
+        g_vtcWebhook->StuurRit( trip, tacho, ctx );
     } );
 
     // FIRST empty the log, THEN create the components. The other way
@@ -551,6 +639,9 @@ TMP_EXPORT void TMP_API truckersmp_shutdown( void )
     g_spelers.reset();
     g_busTracking.reset();
     g_discord.reset();
+    g_vtcBron.reset();
+    g_ritGeheugen.reset();
+    g_spelConfig.reset();
     g_vtcWebhook.reset();
     g_incidentRecorder.reset();
     g_brandstof.reset();

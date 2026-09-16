@@ -52,6 +52,8 @@ meting_ats.txt
 voertuigen.txt
 discord.json
 vtc_webhook.json
+vtc_bron.json
+brandstof_trucks.json
 # game saves (only ever read, never belong here)
 *.sii
 
@@ -59,3 +61,6 @@ vtc_webhook.json
 Thumbs.db
 Desktop.ini
 .DS_Store
+# receivers/discord-bot: the owner's own token and database
+receivers/discord-bot/config.json
+receivers/discord-bot/*.sqlite

@@ -85,6 +85,10 @@ namespace Ritten
         // NOTE: deliberately looks at its own 'm_actief' flag, not at
         // m_huidigeRit.status -- see the same remark in BusTracking.hxx.
         bool HeeftActieveRit() const { return m_actief; }
+        // Approved 16-09: plate text and plate-country token from the truck
+        // configuration, for the company-hub envelope. Read only.
+        std::string Kenteken() const { return m_kenteken; }
+        std::string KentekenLand() const { return m_kentekenLand; }
         const Trip &HuidigeRit() const { return m_huidigeRit; }
 
         // Real (clock) time since trip start, and an estimate of how long it
@@ -615,6 +619,7 @@ namespace Ritten
         std::vector<VoertuigTeller> m_voertuigen;
         int m_huidigVoertuig = -1;  // index in m_voertuigen, -1 = not recognised yet
         std::string m_configMerk, m_configModel;  // from the latest truck configuration
+        std::string m_kenteken, m_kentekenLand;   // approved 16-09, see Kenteken()
         bool m_voertuigenGeladen = false;
         bool m_kmStandVersNaConfig = false;  // has a DIFFERENT odometer been seen since the last truck config?
         double m_kmStandBijConfig = -1.0;  // the reading at the moment of that config (still the previous truck's)

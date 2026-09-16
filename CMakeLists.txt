@@ -84,6 +84,10 @@ add_library(cabnavi SHARED
     src/FuelCosts.cxx
     src/DiscordWebhook.cxx
     src/VtcWebhook.cxx
+    src/VtcBron.cxx
+    src/HubFormaat.cxx
+    src/RitGeheugen.cxx
+    src/SpelConfig.cxx
     src/WebApi.cxx
     src/IncidentRecorder.cxx
     src/Overlay.cxx
@@ -113,6 +117,7 @@ target_include_directories(cabnavi PRIVATE
 target_link_libraries(cabnavi PRIVATE
     nlohmann_json::nlohmann_json
     d3d11
+    crypt32
     dxgi
     winhttp
     version

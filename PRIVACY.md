@@ -42,9 +42,40 @@ And one thing that is off until you set it up:
 
 - **Discord webhook** — if you enter a webhook URL, a summary of each finished
   trip is posted to that channel. The URL is stored locally and never logged.
+- **VTC webhook** — if you enter your company's address and key, each
+  finished trip is sent there as JSON (format in `docs/TRIP_FORMAT.md`).
+  Both are stored locally and never logged. When the envelope format is chosen,
+  your Steam ID and TruckersMP name go along in the trip, and the hub's
+  secret you paste in is used only to sign the body; it is stored encrypted
+  like the other keys.
+  Each trip also carries the route you drove (one point every 5 s), your top
+  speed, speeding stretches, teleports, your plate and the game's gameplay
+  settings read from its config files -- all to the address you chose,
+  nowhere else.
+- **Live position** — off by default. When you switch it on under the VTC
+  webhook, CabNavi sends your position, speed and current job every 10
+  seconds to that same address while you drive. Switch it off and nothing
+  is sent.
+- **Company system (VTC source)** — if you pick where your company lives
+  (CabNavi Discord bot, Trucky, Horizon Dispatch or TruckersHub), CabNavi
+  asks that service once a minute for your company's data and shows it on
+  the VTC tab. What leaves your PC: for the bot, the webhook key above; for
+  Trucky, your Steam ID (to find your account -- no key needed); for Horizon,
+  your public `pk_` key; for TruckersHub, the company token you paste in.
+  That TruckersHub token can also change the member list on their side, so
+  treat it as a company secret. Accepting a dispatch job only tells the bot
+  "I take this one". Nothing else is sent.
+
+Webhook addresses and company keys are stored encrypted with Windows DPAPI,
+tied to your Windows account: the same file copied elsewhere is unreadable.
+Files written by older versions are converted the first time settings are
+saved. Requests carrying a key never follow redirects and refuse replies over
+4 MB. Every address must be https; plain http is accepted only towards the
+machine itself (localhost), for a company system running on the same PC.
 
 There is no telemetry, no analytics, no account, no identifier sent to the
-author. Switch off both network switches and CabNavi contacts nobody.
+author. Switch off both network switches, leave the webhooks and the VTC source
+empty, and CabNavi contacts nobody.
 
 ## debug.log
 

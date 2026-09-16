@@ -329,6 +329,10 @@ namespace Ritten
                                             + std::to_string( static_cast<long long>( m_voertuigen[ beste ].km ) ) + " km counted)" );
         }
         m_huidigVoertuig = beste;
+        // Approved 15-09: the fuel cost side needs to know WHICH truck this
+        // is (its last refuel price is per truck). Brand, model and the slot
+        // in voertuigen.txt, so two identical trucks stay apart.
+        m_brandstof.ZetVoertuigSleutel( m_voertuigen[ beste ].merk + "|" + m_voertuigen[ beste ].model + "|" + std::to_string( beste ) );
 
         // Now the truck is known and the odometer fresh: read the save. At
         // this moment the live reading is exactly the one it was loaded with.
@@ -902,6 +906,15 @@ namespace Ritten
             if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "name" ) )
                 if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
                     model = attr->value.value_string.value;
+            // Approved 16-09: plate and plate-country TOKEN ("california", not the
+            // localised "Californie") for the company-hub envelope. Read here
+            // because the configuration event can only be registered once.
+            if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "license.plate" ) )
+                if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
+                    m_kenteken = attr->value.value_string.value;
+            if( const scs_named_value_t *attr = ZoekAttribuut( cfg->attributes, "license.plate.country.id" ) )
+                if( attr->value.type == SCS_VALUE_TYPE_string && attr->value.value_string.value )
+                    m_kentekenLand = attr->value.value_string.value;
             if( !merk.empty() && ( merk != m_configMerk || model != m_configModel || m_huidigVoertuig < 0 ) )
             {
                 // Different truck (or the first): save the previous one's counter

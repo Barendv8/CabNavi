@@ -66,6 +66,12 @@ cost, and how you are doing over time.
 - Highlight fellow members on the radar and in the player list
 - Convoy reminder on the Live tab when one starts within the hour
 - Your own schedule for the coming month
+- Pick where your company lives -- the CabNavi Discord bot, Trucky, Horizon
+  Dispatch or TruckersHub -- and see its members, convoys, news and your
+  jobs on the VTC tab. Jobs dispatched from the bot can be accepted in the cab
+- Send finished trips to your company's own system with the VTC webhook, in
+  CabNavi's open format or the signed-envelope format that open-source
+  Drivers Hubs (such as the Drivers Hub Project / CHub) accept out of the box
 
 **Other**
 - Dutch and English, switchable in the settings

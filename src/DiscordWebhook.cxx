@@ -1,4 +1,5 @@
 #include "DiscordWebhook.hxx"
+#include "Geheim.hxx"
 #include "Eenheden.hxx"
 #include "Spel.hxx"
 #include "Taal.hxx"
@@ -71,7 +72,7 @@ namespace Ritten
         try
         {
             json j; in >> j;
-            m_instellingen.webhookUrl = j.value( "webhook_url", std::string() );
+            m_instellingen.webhookUrl = Geheim::Ontsleutel( j.value( "webhook_url", std::string() ) );
             m_instellingen.ingeschakeld = j.value( "ingeschakeld", false );
         }
         catch( ... ) { /* corrupt bestand: default (uit) gebruiken */ }
@@ -82,7 +83,7 @@ namespace Ritten
         std::ofstream uit( InstellingenPad() );
         if( !uit ) return;
         json j;
-        j[ "webhook_url" ] = m_instellingen.webhookUrl;
+        j[ "webhook_url" ] = Geheim::Versleutel( m_instellingen.webhookUrl );
         j[ "ingeschakeld" ] = m_instellingen.ingeschakeld;
         uit << j.dump( 2 );
     }
@@ -113,7 +114,7 @@ namespace Ritten
         return m_instellingen.ingeschakeld;
     }
 
-    std::string DiscordWebhook::BouwEmbedJson( const Trip &trip ) const
+    std::string DiscordWebhook::BouwEmbedJson( const Trip &trip, double leegKm, double leegKosten ) const
     {
         const bool isBus = trip.type == TripType::Bus;
         const bool geannuleerd = trip.status == TripStatus::Geannuleerd;
@@ -245,6 +246,15 @@ namespace Ritten
             veld( velden, T( "Brandstofkosten" ),
                   komma( trip.brandstofKostenEuro, 2, "" ).insert( 0, std::string( SpelInfo::Munt() ) + " " ) );
         }
+        // The empty run to the pickup: not part of this job's cost, but it
+        // is how a real planning reports a job.
+        if( leegKm > 0.5 )
+        {
+            const std::string afstandEenheid = std::string( " " ) + Eenheden::AfstandLabel();
+            veld( velden, T( "Leeg gereden" ),
+                  komma( Eenheden::Km( leegKm ), 0, afstandEenheid.c_str() )
+                  + " \xc2\xb7 " + komma( leegKosten, 0, "" ).insert( 0, std::string( SpelInfo::Munt() ) + " " ) );
+        }
 
         // --- Damage ---
         // Chassis belongs here too: that is the figure that counts in a
@@ -349,7 +359,7 @@ namespace Ritten
         return payload.dump();
     }
 
-    void DiscordWebhook::StuurRitVoltooid( const Trip &trip )
+    void DiscordWebhook::StuurRitVoltooid( const Trip &trip, double leegKm, double leegKosten )
     {
         std::string url;
         bool aan;
@@ -363,7 +373,7 @@ namespace Ritten
             return;
         }
 
-        std::string body = BouwEmbedJson( trip );
+        std::string body = BouwEmbedJson( trip, leegKm, leegKosten );
         {
             std::lock_guard<std::mutex> lock( m_queueMutex );
             m_wachtrij.push_back( WerkItem{ url, std::move( body ) } );
