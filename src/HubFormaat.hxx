@@ -21,7 +21,7 @@ namespace Ritten::HubFormaat
         double brandstofPrijsPerLiter = 0.0;
         struct Tank { double liters = 0.0; double kosten = 0.0; };
         std::vector<Tank> tankbeurten;
-        std::string clientVersie = "1.2.0";
+        std::string clientVersie = "1.3.0";
 
         double topKmh = 0.0;
         struct Punt { long long tijd = 0; double x = 0.0, z = 0.0; };
