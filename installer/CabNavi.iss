@@ -1,6 +1,6 @@
 #define AppName "CabNavi"
 #define AppVersion "1.3.1"
-#define AppPublisher "Barendv8"
+#define AppPublisher "CabNavi"
 #define AppURL "https://github.com/CabNavi/CabNavi"
 
 [Setup]
