@@ -1,0 +1,9 @@
+{
+  "discord_token": "PASTE-YOUR-BOT-TOKEN-HERE",
+  "guild_id": "123456789012345678",
+  "trips_channel_id": "123456789012345678",
+  "dispatcher_role": "Dispatcher",
+  "port": 8787,
+  "public_url": "https://your-domain-or-ip:8787",
+  "database": "cabnavi_bot.sqlite"
+}
