@@ -175,8 +175,8 @@ namespace Ritten
         constexpr const wchar_t *UPDATE_HOST = L"raw.githubusercontent.com";
         const wchar_t *UpdatePad()
         {
-            return SpelInfo::IsAts() ? L"/Barendv8/CabNavi/main/data/kaartdata_ats.json"
-                                     : L"/Barendv8/CabNavi/main/data/kaartdata.json";
+            return SpelInfo::IsAts() ? L"/CabNavi/CabNavi/main/data/kaartdata_ats.json"
+                                     : L"/CabNavi/CabNavi/main/data/kaartdata.json";
         }
     }
 

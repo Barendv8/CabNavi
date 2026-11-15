@@ -255,4 +255,4 @@ the way CabNavi computes it.
    rankings.
 
 Questions, corrections, or a tracker of your own that speaks this format:
-open an issue at <https://github.com/Barendv8/CabNavi/issues>.
+open an issue at <https://github.com/CabNavi/CabNavi/issues>.
